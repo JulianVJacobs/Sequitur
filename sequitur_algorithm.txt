@@ -1,0 +1,5 @@
+1. make the CONTEXT the last character of the SEQUENCE
+2. use the CONTEXT to TRAVERSE into the SUFFIX-TRIE
+3. increase the CONTEXT until there are a minimum of endpoints (more than 1)
+4. if there is one option, add it to the SEQUENCE and start again until every READ has been seen
+5. if there is more than one option, shelf that SEQUENCE and start a new SEQUENCE elsewhere until an option is eliminated
