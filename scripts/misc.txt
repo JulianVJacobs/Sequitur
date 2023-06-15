@@ -1,0 +1,179 @@
+
+sequence = 'betty_bought_butter_the_butter_was_bitter_betty_bought_better_butter_to_make_the_bitter_butter_better'
+reads = ['betty_bought_butter_th',
+                        'tter_the_butter_was_',
+                              'he_butter_was_bitter_',
+                                         'as_bitter_betty_bought',
+                                                     'tty_bought_better_butter_t',
+                                                                     'r_butter_to_make_the_',
+                                                                                   'ke_the_bitter_butter_better']
+sequitur = Sequitur(reads,assemble=True)
+sequitur.sequence == sequence if type(sequitur.sequence) is str else all(s in sequence for s in sequitur.sequence)
+
+# %%
+sequence = 'you say hello world, i bellow go to hell'
+reads = ['you say hel',
+            ' say hello wo',
+                    'lo world, i be',
+                          'ld, i bellow go t',
+                                    'ow go to hell']
+sequitur = Sequitur(reads,assemble=True)
+sequitur.sequence == sequence if type(sequitur.sequence) is str else all(s in sequence for s in sequitur.sequence)
+
+# %%
+sequence = 'she_sells_sea_shells_on_the_sea_shore'
+reads = ['she_sells_s',
+               'lls_sea_shel',
+                    'ea_shells_o',
+                       'shells_on_the_s',
+                                  'he_sea_s',
+                                      'ea_shore']
+sequitur = Sequitur(reads,assemble=True)
+sequitur.sequence == sequence if type(sequitur.sequence) is str else all(s in sequence for s in sequitur.sequence)
+
+# %%
+successes = 0
+n = 1
+for seed in range(n):   
+    sequence = generate_genome_sequence(10000,seed=seed)
+    reads = generate_reads(sequence,250,500,50,100,seed=seed)
+    sequitur = Sequitur(reads,assemble=True)
+    s = '| Seed: ' + str(seed) + ' | '
+    if type(sequitur.sequence) is str and sequitur.sequence == sequence:
+        s+='SUC | ' + str(sequitur.sequence) + ' == ' + sequence
+        successes+=1
+    elif type(sequitur.sequence) is list and all(s in sequence for s in sequitur.sequence):
+        s+='PAR | ' + str(sequitur.sequence) + ' ~~ ' + sequence
+        successes+=0.5
+    else: s+='FAI | ' + sequitur.sequence + ' != ' + sequence
+    print(s)
+    print('-----------------------------------------')
+print('ACCURACY: '+str((successes/n)*100)+'%')
+
+# %% [markdown]
+#     SUC: returns the target sequence fully reconstructed
+#     PAR: returns contigs all of which exist in the target sequence (consider coverage?)
+#     FAI: returns a full sequence that is incorrectly reconstructed or a set of contigs where at least one is not found in the target sequence
+
+# %%
+sequence = generate_genome_sequence(10000,seed=0)
+reads = generate_reads(sequence,250,500,50,100,circularise=True,seed=0)
+reads
+
+# %%
+sequitur = Sequitur(reads,assemble=True)
+sequitur.sequence,sequence
+
+# %%
+sequitur.sequence[sequitur.sequence.find('TTAGTTGTGCCGCAGCGAAGTA'):] in sequence,\
+sequitur.sequence[:sequitur.sequence.find('TTAGTTGTGCCGCAGCGAAGTA')] in sequence
+
+# %%
+sequence = generate_genome_sequence(10000,palindrome=True,seed=0)
+reads = generate_reads(sequence,150,150,50,75,seed=0)
+reads
+
+# %%
+sequitur = Sequitur(reads,assemble=True)
+sequitur.sequence,sequence
+
+# %% [markdown]
+# # DeBruijn Graph
+
+# %%
+# ! pip install networkx
+import networkx as nx
+
+
+
+def assemble(G):
+    contigs = []
+    for g in G:
+        seq = ''
+        init = True
+        for n in nx.eulerian_path(g):
+            if init: 
+                seq = n[0] + n[1][-1]
+                init = False
+                continue
+            seq += n[1][-1]
+        contigs += [seq]
+    return contigs
+
+# %%
+sequence = 'betty_bought_butter_the_butter_was_bitter_betty_bought_better_butter_to_make_the_bitter_butter_better'
+reads = ['betty_bought_butter_th',
+                        'tter_the_butter_was_',
+                              'he_butter_was_bitter_',
+                                         'as_bitter_betty_bought',
+                                                     'tty_bought_better_butter_t',
+                                                                     'r_butter_to_make_the_',
+                                                                                   'ke_the_bitter_butter_better']
+for k in range(3,min(len(read) for read in reads)):
+      contigs = assemble(all_eulerian_paths_of(construct_debruijn_graph(reads,k)))
+      if len(contigs) == 1 and contigs[0] == sequence: print("| k = " + str(k) + " | SUC | "+contigs[0] )
+      elif all(seq in sequence for seq in contigs): print("| k = " + str(k) + " | PAR | " + str(contigs))
+      else: print("| k = " + str(k) + " | FAI | " + str(contigs) )
+
+# %%
+sequence = 'you say hello world, i bellow go to hell'
+reads = ['you say hel',
+            ' say hello wo',
+                    'lo world, i be',
+                          'ld, i bellow go t',
+                                    'ow go to hell']
+for k in range(3,min(len(read) for read in reads)):
+      contigs = assemble(all_eulerian_paths_of(construct_debruijn_graph(reads,k)))
+      if len(contigs) == 1 and contigs[0] == sequence: print("| k = " + str(k) + " | SUC | "+contigs[0] )
+      elif all(seq in sequence for seq in contigs): print("| k = " + str(k) + " | PAR | " + str(contigs))
+      else: print("| k = " + str(k) + " | FAI | " + str(contigs) )
+
+# %%
+sequence = 'she_sells_sea_shells_on_the_sea_shore'
+reads = ['she_sells_s',
+               'lls_sea_shel',
+                    'ea_shells_o',
+                       'shells_on_the_s',
+                                  'he_sea_s',
+                                      'ea_shore']
+for k in range(3,min(len(read) for read in reads)):
+      contigs = assemble(all_eulerian_paths_of(construct_debruijn_graph(reads,k)))
+      if len(contigs) == 1 and contigs[0] == sequence: print("| k = " + str(k) + " | SUC | "+contigs[0])
+      elif all(seq in sequence for seq in contigs): print("| k = " + str(k) + " | PAR | " + str(contigs))
+      else: print("| k = " + str(k) + " | FAI | " + str(contigs))
+
+# %%
+sequence = 'ATGCCGTATGGACAACGACT'
+reads = ['ATGCCGTATG','GCCGTATGGA','GTATGGACAA','GACAACGACT']
+for k in range(3,min(len(read) for read in reads)):
+      contigs = assemble(all_eulerian_paths_of(construct_debruijn_graph(reads,k)))
+      if len(contigs) == 1 and contigs[0] == sequence: print("| k = " + str(k) + " | SUC | "+contigs[0])
+      elif all(seq in sequence for seq in contigs): print("| k = " + str(k) + " | PAR | " + str(contigs))
+      else: print("| k = " + str(k) + " | FAI | " + str(contigs))
+
+# %%
+sequence = generate_genome_sequence(10000,seed=seed)
+reads = generate_reads(sequence,250,500,100,180,seed=seed)
+# for k in range(3,min(len(read) for read in reads)):
+k = 183
+contigs = assemble(all_eulerian_paths_of(construct_debruijn_graph(reads,k)))
+# if len(contigs) == 1 and contigs[0] == sequence: print("| k = " + str(k) + " | SUC | "+contigs[0])
+# elif all(seq in sequence for seq in contigs): print("| k = " + str(k) + " | PAR | " + str(contigs))
+# else: print("| k = " + str(k) + " | FAI | " + str(contigs))
+
+# %%
+len(reads),len(contigs)
+
+# %%
+all(r==c for r,c in zip(reads,contigs))
+
+# %%
+from Bio import SeqIO
+
+# %%
+reads = []
+for record in SeqIO.parse("data\Batrachochytrium_dendrobatidis\GCA_000203795.1\GCA_000203795.1_v1.0_genomic.fna",'fasta'):
+    reads += [record.seq]
+reads
+
+
