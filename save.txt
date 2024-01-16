@@ -1,0 +1,131 @@
+def move_col(B: coo_matrix, cols: dict) -> None:
+    for c in range(len(B.col)):
+        B.col[c] = cols[B.col[c]]
+            
+def move_row(B: coo_matrix,rows: dict) -> None:
+    for r in range(len(B.row)):
+        B.row[r] = rows[B.row[r]]
+
+def normalised_damerau_levenshtein_distance(read: str,overlap: str) -> float:
+    return damerau_levenshtein_distance(read.__str__()[:min(len(overlap),len(read))],overlap.__str__()[:min(len(overlap),len(read))])/min(len(overlap),len(read))
+
+def build_suffix_array(reads: list, min_suf_len: int = 3) -> tuple:
+    suf_arr = []
+    for read in reads:
+        read += '$' + str(reads.index(read))
+        for i in range(len(read)):
+            if len(read[i:]) < min_suf_len + 2: continue 
+            suf_arr += [read[i:]]
+    suf_arr.sort()
+    suf_arr_ind = []
+    for s in range(len(suf_arr)):
+        suf_arr_ind += [int(suf_arr[s].split('$')[-1].__str__())]
+        suf_arr[s] = suf_arr[s][:suf_arr[s].find('$')+1]
+    return suf_arr,suf_arr_ind
+
+def create_bipartite_adjacency_matrix(reads: list, suf_arr: list = None, suf_arr_ind: list = None, max_diff: float = 0.25, min_suf_len: int = 3) -> dict:
+    if suf_arr is None or suf_arr_ind is None: suf_arr,suf_arr_ind = build_suffix_array(reads)
+    reads_map = dict(zip(reads,list(range(len(reads)))))
+    B = {}
+    for read in reads:
+        for j in range(min_suf_len + 1):
+            i = suf_arr.index(read[j:]+'$') - 1
+            while normalised_damerau_levenshtein_distance(read,suf_arr[i][:-1]) <= 0.5:
+                if not reads[suf_arr_ind[i]] == read and \
+                   normalised_damerau_levenshtein_distance(read,suf_arr[i][:-1]) < max_diff and \
+                   read.startswith(suf_arr[i][:-1]):
+                    if (reads_map[reads[suf_arr_ind[i]]],reads_map[read]) not in B: B[(reads_map[reads[suf_arr_ind[i]]],reads_map[read])] = len(suf_arr[i][:-1])
+                    else: B[(reads_map[reads[suf_arr_ind[i]]],reads_map[read])] = max(len(suf_arr[i][:-1]),B[(reads_map[reads[suf_arr_ind[i]]],reads_map[read])])
+                i -= 1
+    return B
+
+def find_lower_diagonal_path(B: coo_matrix,reads_map: dict,cols: list,rows: list) -> tuple:
+    argpen = lambda l: np.argpartition(l,-2)[-2]
+
+    if B.sum(axis=1).min() == 0:
+        new_cols = [rows[B.sum(axis=1).argmin()]] + list(c for c in cols if c not in [rows[B.sum(axis=1).argmin()],cols[B.sum(axis=0).argmin()]]) + [cols[B.sum(axis=0).argmin()]]
+    else: new_cols = list(c for c in cols if c != cols[B.sum(axis=0).argmin()]) + [cols[B.sum(axis=0).argmin()]]
+    cols_map = dict((cols.index(c),new_cols.index(c)) for c in range(len(cols)))
+    move_col(B,cols_map)
+    cols = new_cols
+
+    new_rows = [rows[B.sum(axis=1).argmin()]] + list(r for r in rows if r != rows[B.sum(axis=1).argmin()])
+    rows_map = dict((rows.index(r),new_rows.index(r)) for r in range(len(rows)))
+    move_row(B,rows_map)
+    rows = new_rows
+
+    i,j = len(rows), len(cols) - 1
+
+    while j > 0:
+        if cols[B.getrow(rows.index(cols[j])).argmax()] in cols[j:]:
+            # when there is only one nonzero value on the row and that value is in the latter side of the
+            # matrix, i need to select that column, find the row it has in the former side of the matrix
+            # and then do the swap
+            # return B, cols, new_cols, rows, new_rows, i, j, None
+            ts_rows = {rows.index(cols[j])}
+            ts_rows_ = set()
+            ts_cols = {B.getrow(rows.index(cols[j])).argmax()}
+            ts_cols_ = set()
+
+            while not any(cols[c] in cols[:j] for c in ts_cols) or len(ts_rows) < 2:# or (not any(rows[r] in rows[:i] for r in ts_rows) and len(ts_cols) < 2):
+                for c_ in ts_cols.difference(ts_cols_):
+                    ts_rows.update(np.argpartition(B.getcol(c_).toarray().flatten(),-2)[::-1][:min(2,len(B.getcol(c_).nonzero()[0]))])
+                ts_cols_.update(ts_cols)
+                
+                for r_ in ts_rows.difference(ts_rows_):
+                    ts_cols.update(np.argpartition(B.getrow(r_).toarray().flatten(),-2)[::-1][:min(2,len(B.getrow(r_).nonzero()[1]))])
+                ts_rows_.update(ts_rows)
+
+            ts_cols = list(ts_cols)
+            ts_cols.sort(reverse=True)
+
+            new_cols = list(c for c in cols[:j] if c not in [cols[ts_cols[-1]]]) + [cols[ts_cols[-1]]] + cols[j:]
+            cols_map = dict((cols.index(c),new_cols.index(c)) for c in range(len(cols)))
+            move_col(B,cols_map)
+            cols = new_cols
+
+            new_rows = list(r for r in rows[:i] if r not in [cols[j]]) + [cols[j]] + rows[i:]
+            rows_map = dict((rows.index(r),new_rows.index(r)) for r in range(len(rows)))
+            move_row(B,rows_map)
+            rows = new_rows
+            
+            for c in ts_cols[:-1]:
+                max_row = B.getcol(c).argmax()
+                j_max, j_pen = B.getrow(max_row).argmax(), argpen(B.getrow(max_row).toarray().flatten())
+                i_max, i_pen = j_max+1, j_pen+1
+
+                new_cols = cols[:j_pen] + [cols[j_max]] + cols[i_pen:j_max] + [cols[j_pen]] + cols[i_max:]
+                cols_map = dict((cols.index(c),new_cols.index(c)) for c in range(len(cols)))
+                move_col(B,cols_map)
+                cols = new_cols
+
+                new_rows = list(r for r in rows[:i_pen] if r not in [cols[j_max]]) + [cols[j_pen]] + list(r for r in rows[i_pen:i_max] if r not in [cols[j_pen]]) + [cols[j_max]] + rows[i_max:]
+                rows_map = dict((rows.index(r),new_rows.index(r)) for r in range(len(rows)))
+                move_row(B,rows_map)
+                rows = new_rows
+        else:
+            new_cols = list(c for c in cols[:j] if c not in [cols[B.getrow(rows.index(cols[j])).argmax()]]) + [cols[B.getrow(rows.index(cols[j])).argmax()]] + cols[j:]
+            try:
+                cols_map = dict((cols.index(c),new_cols.index(c)) for c in range(len(cols)))
+            except:
+                print(1)
+                return B, cols, new_cols, rows, new_rows, i, j, None
+            move_col(B,cols_map)
+            cols = new_cols
+
+            new_rows = list(r for r in rows[:i] if r not in [cols[j]]) + [cols[j]] + rows[i:]
+            try:
+                rows_map = dict((rows.index(r),new_rows.index(r)) for r in range(len(rows)))
+            except:
+                print(2)
+                return B, cols, new_cols, rows, new_rows, i, j, None
+            move_row(B,rows_map)
+            rows = new_rows
+        j -= 1
+        i -= 1
+
+    seq = ''
+    for s,d in zip(list(reads_map[k] for k in rows)[:-1],B.diagonal(-1)):
+        seq += s[:-d]
+    seq += list(reads_map[k] for k in rows)[-1]
+    return seq
