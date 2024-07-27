@@ -1,3 +1,8 @@
+# ignore everything in the virtual environment except the requirements
 .venv/*
 !.venv/requirements.txt
+
+# ignore the ncbi directory which will be cloned
+.ncbi
+
 *.gz
