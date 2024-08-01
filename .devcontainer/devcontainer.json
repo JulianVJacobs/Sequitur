@@ -10,8 +10,13 @@
 				"ms-python.vscode-pylance",
 				"ms-python.python",
 				"ms-python.debugpy",
-				"ms-azuretools.vscode-docker"
+				"ms-azuretools.vscode-docker",
+				"donjayamanne.githistory",
+				"GitHub.copilot"
 			]
 		}
-	}
+	},
+	"forwardPorts": [
+        41777
+    ]
 }

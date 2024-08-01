@@ -2,6 +2,10 @@
 .venv/*
 !.venv/requirements.txt
 
+data
+
+*.slurm
+
 # ignore the ncbi directory which will be cloned
 .ncbi
 
