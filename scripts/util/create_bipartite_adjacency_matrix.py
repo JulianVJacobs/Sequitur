@@ -10,6 +10,15 @@ def normalised_damerau_levenshtein_distance(read: str,overlap: str) -> float:
     d = damerau_levenshtein_distance(read[:m],overlap[:m],similarity=False)
     return (d/m,m-d)
 
+def next_suffix(cursor: sqlite3.Cursor, acc: str, offset: int, batch_size: int = 100):
+    cursor.execute(f'''
+        SELECT seq_id, suffix FROM {acc} ORDER BY suffix LIMIT -1 OFFSET ?
+    ''', (offset,))
+    while True:
+        rows = cursor.fetchmany(batch_size)
+        if not rows: break
+        for row in rows: yield row
+
 def main(db: str, in_dir:str, acc: str, min_suf_len: int = 3, max_diff: float = 0.25):
     conn = sqlite3.connect(db)
     cursor = conn.cursor()
@@ -32,11 +41,7 @@ def main(db: str, in_dir:str, acc: str, min_suf_len: int = 3, max_diff: float = 
                 ''', (str(record.seq[i:]),))
                 offset = cursor.fetchone()[0] + 1
             
-                cursor.execute(f'''
-                    SELECT seq_id, suffix FROM {acc} ORDER BY suffix LIMIT -1 OFFSET ?
-                ''', (offset,))
-            
-                for seq_id, suffix in cursor:
+                for seq_id, suffix in next_suffix(cursor, acc, offset):
                     edit_distance_f, edit_distance_i = normalised_damerau_levenshtein_distance(str(record.seq[i:]),suffix)
                     if edit_distance_f > max_diff: break
                     if seq_id.startswith(s_seq_id): continue
