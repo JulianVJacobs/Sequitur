@@ -1,12 +1,18 @@
 # ignore everything in the virtual environment except the requirements
-.venv/*
-!.venv/requirements.txt
+**/.venv/*
+!**/.venv/requirements.txt
 
 data
-
+!data/Raphanus sativus_NC_018551.1/*
 *.slurm
+
+julian jacobs 1605267 masters dissertation.pdf
 
 # ignore the ncbi directory which will be cloned
 .ncbi
 
 *.gz
+
+*.sif
+
+rust/target/*

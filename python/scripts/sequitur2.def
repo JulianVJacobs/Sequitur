@@ -1,0 +1,67 @@
+Bootstrap: docker
+From: alpine
+
+%post
+    # Install dependencies
+    apk fix && apk --no-cache --update add \
+        git \
+        build-base \
+        python3-dev \
+        py3-pip \
+        linux-headers \
+        perl \
+        cmake \
+        zlib-dev \
+        wget \
+        libx11 \
+        libxkbfile \
+        libsecret \
+        libxrender \
+        libxtst \
+        libxrandr \
+        libxfixes \
+        libxcursor \
+        libxdamage \
+        libxcomposite \
+        alsa-lib \
+        mesa-gl \
+        glib \
+        nss \
+        gtk+3.0 \
+        curl \
+        autoconf \
+        automake \
+        make \
+        gcc \
+        musl-dev \
+        perl \
+        bash \
+        bzip2-dev \
+        xz-dev \
+        curl-dev \
+        openssl-dev \
+        ncurses-dev \
+        libdeflate-dev
+
+    # Download and install Visual Studio Code
+    curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz
+    tar -xzf vscode_cli.tar.gz -C /opt
+    ln -s /opt/code /usr/local/bin/code
+    rm vscode_cli.tar.gz
+
+    wget https://github.com/samtools/samtools/releases/download/1.20/samtools-1.20.tar.bz2
+    tar -xvjf samtools-1.20.tar.bz2 
+    rm samtools-1.20.tar.bz2
+    cd samtools-1.20
+    ./configure && make install
+    cd .. && rm -r samtools-1.20
+
+%environment
+    export PATH=/usr/local/bin:$PATH
+
+%labels
+    Maintainer Julian Jacobs
+    Version 1.0
+
+%runscript
+    exec "$@"

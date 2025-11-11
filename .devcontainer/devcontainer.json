@@ -12,11 +12,16 @@
 				"ms-python.debugpy",
 				"ms-azuretools.vscode-docker",
 				"donjayamanne.githistory",
-				"GitHub.copilot"
+				"GitHub.copilot",
+				"ms-vscode-remote.remote-ssh"
 			]
 		}
 	},
+	"mounts": [
+		"source=c:/Users/a0068449/.ssh,target=/root/.ssh,type=bind,consistency=cached"
+	],
+	"postCreateCommand": "/workspaces/Sequitur/.devcontainer/post-create.sh",
 	"forwardPorts": [
-        41777
-    ]
+		41777
+	]
 }

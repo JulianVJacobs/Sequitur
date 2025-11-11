@@ -1,0 +1,44 @@
+Bootstrap: docker
+From: alpine
+
+%post
+	apk fix && apk --no-cache --update add git \
+										   build-base \
+										   python3-dev \
+										   py3-pip \
+										   linux-headers \
+										   perl \
+										   cmake \
+										   zlib-dev
+
+	git clone https://github.com/ncbi/ncbi-vdb.git 
+	cd ncbi-vdb
+	./configure
+	make
+	cd ..
+
+	git clone https://github.com/ncbi/sra-tools.git
+	cd sra-tools
+	./configure
+	make
+	cd ..
+
+	rm -r ncbi-vdb 
+	rm -r sra-tools
+
+	git clone https://github.com/felipelouza/gsufsort.git
+	cd gsufsort
+	make
+	mv gsufsort gsufsort-64 /bin
+	cd ..
+	rm -r gsufsort
+
+%environment
+	export PATH="/root/ncbi-outdir/sra-tools/linux/gcc/x86_64/rel/bin/:${PATH}"
+
+%labels
+	Julian Jacobs
+	Version 1.0
+
+%runscript
+	exec "$@"
