@@ -200,9 +200,38 @@ pub fn create_overlap_graph(
 	(affix_array, adjacency, overlap_lengths)
 }
 
+/// Compute normalised per-edge confidences (softmax over outgoing weights).
+pub fn compute_edge_confidences(adjacency: &Adjacency) -> Vec<Vec<(usize, f64)>> {
+	adjacency
+		.iter()
+		.map(|edges| {
+			if edges.is_empty() {
+				return Vec::new();
+			}
+
+			let max_weight = edges.values().copied().max().unwrap_or(0) as f64;
+			let mut ordered: Vec<(usize, usize)> = edges.iter().map(|(&dst, &weight)| (dst, weight)).collect();
+			ordered.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+			let exps: Vec<f64> = ordered
+				.iter()
+				.map(|(_, weight)| ((*weight as f64) - max_weight).exp())
+				.collect();
+			let sum: f64 = exps.iter().sum();
+
+			ordered
+				.into_iter()
+				.zip(exps.into_iter())
+				.map(|((dst, _weight), value)| (dst, if sum == 0.0 { 0.0 } else { value / sum }))
+				.collect()
+		})
+		.collect()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::collections::HashMap;
 
 	#[test]
 	fn computes_normalised_distance() {
@@ -232,5 +261,27 @@ mod tests {
 
 		assert_eq!(edge, Some(2));
 		assert_eq!(span, Some(2));
+	}
+
+	#[test]
+	fn computes_edge_confidences_per_source() {
+		let mut adjacency: Adjacency = vec![HashMap::new(); 3];
+		adjacency[0].insert(1, 3);
+		adjacency[0].insert(2, 1);
+		adjacency[1].insert(2, 4);
+
+		let confidences = compute_edge_confidences(&adjacency);
+		assert_eq!(confidences.len(), 3);
+
+		let row0_sum: f64 = confidences[0].iter().map(|(_, p)| *p).sum();
+		assert!((row0_sum - 1.0).abs() < 1e-6);
+		assert!(confidences[0][0].1 > confidences[0][1].1);
+
+		let row1_sum: f64 = confidences[1].iter().map(|(_, p)| *p).sum();
+		assert!((row1_sum - 1.0).abs() < 1e-6);
+		assert_eq!(confidences[1][0].0, 2);
+		assert!((confidences[1][0].1 - 1.0).abs() < 1e-12);
+
+		assert!(confidences[2].is_empty());
 	}
 }

@@ -218,9 +218,124 @@ pub fn find_lower_diagonal_path(
 	String::from_utf8(sequence).expect("assembled sequence should be valid UTF-8")
 }
 
+/// Detect cycles (SCCs) in adjacency represented as Vec<HashMap<usize,usize>>.
+pub fn detect_cycles(adjacency: &Adjacency) -> Vec<Vec<usize>> {
+	// Build adjacency list
+	let n = adjacency.len();
+	let mut g: Vec<Vec<usize>> = vec![Vec::new(); n];
+	for (u, m) in adjacency.iter().enumerate() {
+		for (&v, _) in m.iter() {
+			if u < n && v < n {
+				g[u].push(v);
+			}
+		}
+	}
+
+	// Tarjan's algorithm
+	let mut index = 0usize;
+	let mut indices = vec![None; n];
+	let mut lowlink = vec![0usize; n];
+	let mut stack: Vec<usize> = Vec::new();
+	let mut onstack = vec![false; n];
+	let mut sccs: Vec<Vec<usize>> = Vec::new();
+
+	fn strongconnect(
+		v: usize,
+		index: &mut usize,
+		indices: &mut [Option<usize>],
+		lowlink: &mut [usize],
+		stack: &mut Vec<usize>,
+		onstack: &mut [bool],
+		g: &Vec<Vec<usize>>,
+		sccs: &mut Vec<Vec<usize>>,
+	) {
+		indices[v] = Some(*index);
+		lowlink[v] = *index;
+		*index += 1;
+		stack.push(v);
+		onstack[v] = true;
+
+		for &w in &g[v] {
+			if indices[w].is_none() {
+				strongconnect(w, index, indices, lowlink, stack, onstack, g, sccs);
+				lowlink[v] = lowlink[v].min(lowlink[w]);
+			} else if onstack[w] {
+				if let Some(iw) = indices[w] {
+					lowlink[v] = lowlink[v].min(iw);
+				}
+			}
+		}
+
+		if let Some(iv) = indices[v] {
+			if lowlink[v] == iv {
+				let mut comp = Vec::new();
+				while let Some(w) = stack.pop() {
+					onstack[w] = false;
+					comp.push(w);
+					if w == v {
+						break;
+					}
+				}
+				if comp.len() > 0 {
+					sccs.push(comp);
+				}
+			}
+		}
+	}
+
+	for v in 0..n {
+		if indices[v].is_none() {
+			strongconnect(
+				v,
+				&mut index,
+				&mut indices,
+				&mut lowlink,
+				&mut stack,
+				&mut onstack,
+				&g,
+				&mut sccs,
+			);
+		}
+	}
+
+	// filter singletons without self-loop
+	sccs
+		.into_iter()
+		.filter(|comp| {
+			if comp.len() > 1 {
+				true
+			} else {
+				let v = comp[0];
+				adjacency[v].contains_key(&v)
+			}
+		})
+		.collect()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn detect_simple_cycle() {
+		let mut adjacency: Adjacency = vec![HashMap::new(); 3];
+		// 0 -> 1, 1 -> 2, 2 -> 0 (cycle)
+		adjacency[0].insert(1, 1);
+		adjacency[1].insert(2, 1);
+		adjacency[2].insert(0, 1);
+
+		let sccs = detect_cycles(&adjacency);
+		let mut found_cycle = false;
+		for comp in sccs.iter() {
+			let mut sorted = comp.clone();
+			sorted.sort();
+			if sorted == vec![0, 1, 2] {
+				found_cycle = true;
+				break;
+			}
+		}
+		assert!(found_cycle, "Expected SCC containing nodes 0, 1, 2");
+	}
 
 	#[test]
 	fn builds_sparse_matrix_from_adjacency() {

@@ -15,8 +15,6 @@ julian jacobs 1605267 masters dissertation.pdf
 
 *.sif
 
-rust/target/*
-
 # Common build and editor artifacts
 **/target/
 **/*.lock

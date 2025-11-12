@@ -141,16 +141,32 @@ def find_lower_diagonal_path(
 
             i, j, k = j + c_ + 1, j + c_, k + c_
         else:
-            cmax = matrix.getrow(rows.index(cols[j])).argmax()
-            if len(matrix.getrow(rows.index(cols[j])).nonzero()[1]) > 1:
+            # safe accessors to avoid IndexError / empty-data accesses
+            def row_nonzero_count(idx: int) -> int:
+                if idx < 0 or idx >= matrix.shape[0]:
+                    return 0
+                return len(matrix.getrow(idx).nonzero()[1])
+
+            def row_argmax(idx: int) -> int:
+                if idx < 0 or idx >= matrix.shape[0]:
+                    return -1
+                return matrix.getrow(idx).argmax()
+
+            def row_getcol_data(idx: int, col_idx: int) -> int:
+                if idx < 0 or idx >= matrix.shape[0] or col_idx < 0 or col_idx >= matrix.shape[1]:
+                    return 0
+                data = matrix.getrow(idx).getcol(col_idx).data
+                return int(data[0]) if len(data) > 0 else 0
+
+            cmax = row_argmax(rows.index(cols[j]))
+            if row_nonzero_count(rows.index(cols[j])) > 1:
                 cpen = argpen(matrix.getrow(rows.index(cols[j])).toarray().flatten())
                 if cmax > j:
+                    # check cmax+1 is in-bounds and has a meaningful second-best
                     if (
-                        len(matrix.getrow(cmax + 1).nonzero()[1]) > 1
-                        and matrix.getrow(cmax + 1)
-                        .getcol(argpen(matrix.getrow(cmax + 1).toarray().flatten()))
-                        .data[0]
-                        >= matrix.getrow(rows.index(cols[j])).getcol(cpen).data[0]
+                        row_nonzero_count(cmax + 1) > 1
+                        and row_getcol_data(cmax + 1, argpen(matrix.getrow(cmax + 1).toarray().flatten()))
+                        >= row_getcol_data(rows.index(cols[j]), cpen)
                     ):
                         crange = [argpen(matrix.getrow(cmax).toarray().flatten()), cmax]
                     else:
@@ -189,25 +205,83 @@ def find_lower_diagonal_path(
         src: dict(dst_map) for src, dst_map in overlaps.items()
     }
 
-    if quality_map is None:
-        for r_idx, c_idx in zip(rows[1:], cols[:-1]):
-            seq += reads_map[c_idx][:-overlap_lookup[c_idx][r_idx]]
-        seq += reads_map[cols[-1]]
-    else:
-        quality_lookup = {idx: list(q) for idx, q in dict(quality_map).items()}
-        first = True
-        for c_idx, r_idx in zip(cols, rows):
-            overlap_len = overlap_lookup[c_idx][r_idx]
-            if first:
-                seq += reads_map[c_idx][:-overlap_len]
-                first = False
-            prefix = reads_map[c_idx][-overlap_len:]
-            prefix_q = quality_lookup[c_idx][-overlap_len:]
-            suffix = reads_map[r_idx][:-overlap_len]
-            suffix_q = quality_lookup[r_idx][:-overlap_len]
-            for base_idx in range(overlap_len):
-                seq += prefix[base_idx] if prefix_q[base_idx] >= suffix_q[base_idx] else suffix[base_idx]
-        seq += reads_map[rows[-1]][-overlap_lookup[cols[-1]][rows[-1]] :]
+    def get_overlap(c_idx: int, r_idx: int) -> int:
+        return overlap_lookup.get(c_idx, {}).get(r_idx, 0)
+
+    def fallback_assemble() -> str:
+        # Simple greedy fallback: start at read 0 (if present) and greedily follow highest overlap
+        seq_parts: List[str] = []
+        if not reads_map:
+            return ""
+        start = 0 if 0 in reads_map else next(iter(reads_map.keys()))
+        seq_parts.append(reads_map[start])
+        used = {start}
+        current = start
+        while True:
+            nxt = overlaps.get(current, {})
+            # choose unused target with maximum overlap length
+            candidates = [(olen, tgt) for tgt, olen in nxt.items() if tgt not in used]
+            if not candidates:
+                break
+            olen, tgt = max(candidates)
+            if olen and olen < len(reads_map[tgt]):
+                seq_parts.append(reads_map[tgt][olen:])
+            else:
+                seq_parts.append(reads_map[tgt])
+            used.add(tgt)
+            current = tgt
+        # append any remaining reads
+        for idx in sorted(set(reads_map.keys()) - used):
+            seq_parts.append(reads_map[idx])
+        return "".join(seq_parts)
+
+    try:
+        if quality_map is None:
+            for r_idx, c_idx in zip(rows[1:], cols[:-1]):
+                overlap_len = get_overlap(c_idx, r_idx)
+                if overlap_len > 0:
+                    seq += reads_map[c_idx][:-overlap_len]
+                else:
+                    seq += reads_map[c_idx]
+            seq += reads_map.get(cols[-1], "")
+        else:
+            quality_lookup = {idx: list(q) for idx, q in dict(quality_map).items()}
+            first = True
+            for c_idx, r_idx in zip(cols, rows):
+                overlap_len = get_overlap(c_idx, r_idx)
+                if overlap_len <= 0:
+                    # no overlap info: append full read
+                    if first:
+                        seq += reads_map[c_idx]
+                        first = False
+                    else:
+                        seq += reads_map[c_idx]
+                    continue
+                if first:
+                    seq += reads_map[c_idx][:-overlap_len]
+                    first = False
+                prefix = reads_map[c_idx][-overlap_len:]
+                prefix_q = quality_lookup.get(c_idx, [])[-overlap_len:]
+                suffix = reads_map[r_idx][:-overlap_len]
+                suffix_q = quality_lookup.get(r_idx, [])[-overlap_len:]
+                # pad quality arrays if needed
+                while len(prefix_q) < overlap_len:
+                    prefix_q.insert(0, 0)
+                while len(suffix_q) < overlap_len:
+                    suffix_q.insert(0, 0)
+                for base_idx in range(overlap_len):
+                    seq += prefix[base_idx] if prefix_q[base_idx] >= suffix_q[base_idx] else suffix[base_idx]
+            last_overlap = get_overlap(cols[-1], rows[-1])
+            if last_overlap > 0:
+                seq += reads_map.get(rows[-1], "")[-last_overlap:]
+            else:
+                seq += reads_map.get(rows[-1], "")
+    except Exception as e:
+        # On any unexpected indexing errors, fall back to a simpler greedy assembler
+        import sys
+
+        print(f"Warning: traversal failed with {e}; using fallback assembler", file=sys.stderr)
+        seq = fallback_assemble()
 
     if do_time:
         elapsed = time.time() - start

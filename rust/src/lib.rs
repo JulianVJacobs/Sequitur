@@ -11,6 +11,7 @@ pub mod matching;
 pub use suffix::{
     AffixArray, AffixEntry, AffixKind, DEFAULT_MIN_SUFFIX_LEN,
 };
+pub mod python_bindings;
 pub use overlap::{
     create_overlap_graph,
     normalised_damerau_levenshtein_distance,
