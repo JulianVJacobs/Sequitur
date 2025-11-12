@@ -1,0 +1,27 @@
+**Sequitur Agent Guide**
+- **Localisation**: Follow South African English (`en-ZA`) spelling in identifiers, comments, and user-facing text (e.g., "colour", "optimise"); audit and correct deviations when touching affected files.
+- **Architecture**: Python reference in `python/` is feature-complete; Rust crate in `rust/` mirrors the same pipeline but is still maturing—cross-validate behaviour whenever porting features.
+- **Pipeline Flow**: Reads move through `build_suffix_array` → `create_bipartite_adjacency_matrix` → `adjacency_to_sparse` → `find_lower_diagonal_path`; keep these interfaces stable because CLI, experiments, and notebooks rely on them.
+- **Suffix Array Contract**: `build_suffix_array` decorates affixes as `suffix${idx}` / `prefix^{idx}`—Rust’s `AffixArray` expects the same format; any change must update both languages plus lookup logic.
+- **Overlap Construction**: `create_bipartite_adjacency_matrix` filters overlaps by `max_diff` and keeps the highest weight per edge; tightening thresholds or score semantics will ripple into matching correctness tests.
+- **Threading Toggle**: Python overlap building optionally uses threads (`--threads`), but deterministic single-threaded runs are the baseline for debugging; avoid introducing non-determinism in scoring.
+- **Matching Semantics**: `find_lower_diagonal_path` assumes square COO matrices with identical row/col orderings and uses fallback greedy assembly on failure—validate both code paths when editing traversal heuristics.
+- **Quality Scores**: When qualities are supplied, overlapping bases are resolved by per-position quality comparisons; maintain array alignment (`quality_map[idx][-overlap_len:]`) when altering overlap math.
+- **CLI Entry**: `python/sequitur.py` ingests paired FASTQ files, reverse-complements reads2, and optionally writes metrics; preserve CLI flags and CSV header order to keep notebooks and scripts stable.
+- **Python Setup**: Work inside `python/`; create `.venv`, install `numpy scipy biopython fastDamerauLevenshtein networkx pylcs hungarian-algorithm memory-profiler`; export `PYTHONPATH=.` before invoking modules.
+- **Experiments**: `python/experiments/natural_language.py` reproduces toy datasets; it depends on the same core functions and is used for regression checks alongside notebooks.
+- **Rust Modules**: `suffix.rs`, `overlap.rs`, `matching.rs` are direct ports of the Python core; keep public APIs aligned (`Adjacency`, `OverlapLengths`, traversal expectations) so PyO3 bindings and CLI compile.
+- **Rust CLI**: `cargo run -- <reads1> <reads2> --output-fasta results/out.fasta` performs a smoke pass on each file independently; it is primarily used by integration scripts—do not break argument order.
+- **Rust Tests**: `cargo test` exercises suffix construction, overlap scoring, matching, and CLI smoke tests; add Rust regression tests alongside new features.
+- **Python ↔ Rust Bridge**: `rust/src/python_bindings.rs` exposes `assemble_from_reads` and `analyse_reads`; signatures mirror Python structures (lists of strings) and rely on shared matching invariants.
+- **Integration Workflow**: `scripts/integration/run_integration.sh` compares Rust and Python assemblies over `tests/fixtures/*.fastq`; ensure the Rust binary and Python `.venv` exist before running it.
+- **Results Storage**: Both pipelines write FASTA outputs under `results/`; avoid hard-coding alternate paths so integration and notebooks continue to discover artifacts.
+- **Logging & Metrics**: Rust uses `env_logger`; Python prints timing stats and optional edit distance using `fastDamerauLevenshtein`; keep these hooks when adding instrumentation.
+- **External Dependencies**: Python core depends on Biopython + SciPy stack; Rust uses `strsim` for Damerau-Levenshtein and `sprs` for sparse matrices—account for these when tweaking build scripts or containers.
+- **Notebook Context**: `python/sequitur.ipynb` and `python/results.ipynb` document algorithmic intent; follow their assumptions (e.g., suffix decoration, score thresholds) when refactoring code.
+- **Data Fixtures**: FASTQ samples live in `tests/fixtures/`; use them for deterministic repros instead of crafting new inline strings unless unit tests demand it.
+- **Reverse Complements**: The CLI reverses and complements reads from the second FASTQ; maintain this behaviour in any new loaders or dataset handling utilities.
+- **Error Handling**: Python assembler raises on empty read sets; Rust returns `anyhow::Result`; ensure new callers surface meaningful errors without swallowing context.
+- **Performance Notes**: Both implementations treat `min_suffix_len` as a hard guard—when tuning performance, adjust spans consistently across Python and Rust and update docs/tests accordingly.
+- **Extending Matching**: For new heuristics, update both Python `matching.py` and Rust `matching.rs`, and verify the PyO3 bindings still compile (re-export functions via `lib.rs`).
+- **Release Checklist**: Before pushes, run `python/sequitur.py … --metrics-csv …`, `cargo test`, and `scripts/integration/run_integration.sh`; this combination is the practical acceptance suite.
