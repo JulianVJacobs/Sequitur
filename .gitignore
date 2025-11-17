@@ -11,7 +11,8 @@ julian jacobs 1605267 masters dissertation.pdf
 # ignore the ncbi directory which will be cloned
 .ncbi
 
-*.gz
+/tests/
+!tests/datasets.yaml
 
 *.sif
 

@@ -25,8 +25,8 @@ for FIXTURE in "${FIXTURES[@]}"; do
   fi
 
   BASE=$(basename "$FIXTURE" .fastq)
-  RUST_OUT="$ROOT/results/${BASE}_rust.fasta"
-  PY_OUT="$ROOT/results/${BASE}_py.fasta"
+  RUST_OUT="$ROOT/tests/results/${BASE}_rust.fasta"
+  PY_OUT="$ROOT/tests/results/${BASE}_py.fasta"
   mkdir -p "$(dirname "$RUST_OUT")"
   "$RUST_BIN" "$FIXTURE" "$FIXTURE" --output-fasta "$RUST_OUT" $VERBOSE_FLAG || true
 

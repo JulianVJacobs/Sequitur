@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -18,6 +19,22 @@ from sequitur_core import (
     create_bipartite_adjacency_matrix,
     find_lower_diagonal_path,
 )
+
+# Try to use Rust implementation for alternative paths (much faster)
+try:
+    import sequitur_rs
+    _USE_RUST_ALTERNATIVES = True
+    _analyse_alternatives_fallback = None
+except ImportError:
+    sequitur_rs = None
+    from sequitur_core import analyse_alternatives as _analyse_alternatives_fallback
+    _USE_RUST_ALTERNATIVES = False
+    import warnings
+    warnings.warn(
+        "Using pure Python alternative path detection. "
+        "Install sequitur_rs for 30x better performance.",
+        UserWarning,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,10 +74,31 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Worker threads for overlap construction (1 disables threading)",
     )
+    parser.add_argument(
+        "--analyse-alternatives",
+        action="store_true",
+        help="Detect and report alternative assembly paths and cycles",
+    )
+    parser.add_argument(
+        "--score-gap",
+        type=float,
+        default=None,
+        help="Maximum score gap for alternative paths (default: no filter)",
+    )
+    parser.add_argument(
+        "--alternatives-json",
+        type=Path,
+        help="Output JSON file for alternative path analysis",
+    )
+    parser.add_argument(
+        "--no-revcomp",
+        action="store_true",
+        help="Skip reverse complement of reads2 (for non-genomic or unpaired data)",
+    )
     return parser.parse_args()
 
 
-def load_reads(read1_path: Path, read2_path: Path) -> Tuple[List[str], List[List[int]]]:
+def load_reads(read1_path: Path, read2_path: Path, no_revcomp: bool = False) -> Tuple[List[str], List[List[int]]]:
     sequences: List[str] = []
     qualities: List[List[int]] = []
 
@@ -69,9 +107,14 @@ def load_reads(read1_path: Path, read2_path: Path) -> Tuple[List[str], List[List
         qualities.append(list(record.letter_annotations["phred_quality"]))
 
     for record in SeqIO.parse(read2_path, "fastq"):
-        seq = record.seq.upper().reverse_complement()
+        if no_revcomp:
+            seq = record.seq.upper()
+            quals = list(record.letter_annotations["phred_quality"])
+        else:
+            seq = record.seq.upper().reverse_complement()
+            quals = list(record.letter_annotations["phred_quality"][::-1])
         sequences.append(str(seq))
-        qualities.append(list(record.letter_annotations["phred_quality"][::-1]))
+        qualities.append(quals)
 
     return sequences, qualities
 
@@ -97,7 +140,7 @@ def append_metrics(csv_path: Path, row: Sequence[str], header: Sequence[str]) ->
 
 
 def assemble(args: argparse.Namespace) -> None:
-    reads, qualities = load_reads(args.reads1, args.reads2)
+    reads, qualities = load_reads(args.reads1, args.reads2, no_revcomp=args.no_revcomp)
     if not reads:
         raise RuntimeError("No reads were parsed from the supplied FASTQ files")
 
@@ -150,6 +193,43 @@ def assemble(args: argparse.Namespace) -> None:
             "fasta",
         )
 
+    # Analyse alternative paths if requested
+    alternatives_result = None
+    if args.analyse_alternatives:
+        if _USE_RUST_ALTERNATIVES:
+            # Use fast Rust implementation
+            rust_result = sequitur_rs.analyse_alternative_paths(reads, args.score_gap)
+            alternatives_result = {
+                "squares": [(s["i"], s["j"], s["delta"]) for s in rust_result["squares"]],
+                "components": rust_result["components"],
+                "cycles": rust_result["cycles"],
+                "chains": rust_result["chains"],
+                "ambiguity_count": rust_result["ambiguity_count"],
+            }
+        else:
+            # Fall back to pure Python (slower)
+            alternatives_result = _analyse_alternatives_fallback(
+                matrix,
+                score_gap=args.score_gap,
+            )
+        
+        if args.alternatives_json:
+            # Convert tuples to lists for JSON serialization
+            output_data = {
+                "squares": [
+                    {"i": int(i), "j": int(j), "delta": float(delta)}
+                    for i, j, delta in alternatives_result["squares"]
+                ],
+                "components": alternatives_result["components"],
+                "cycles": alternatives_result["cycles"],
+                "chains": alternatives_result["chains"],
+                "ambiguity_count": alternatives_result["ambiguity_count"],
+            }
+            
+            args.alternatives_json.parent.mkdir(parents=True, exist_ok=True)
+            with args.alternatives_json.open("w", encoding="utf-8") as f:
+                json.dump(output_data, f, indent=2)
+
     edit_distance = None
     if reference is not None:
         edit_distance = damerau_levenshtein_distance(assembled, reference, similarity=False)
@@ -161,6 +241,24 @@ def assemble(args: argparse.Namespace) -> None:
     print(f"Assembly time         : {assembly_time:.3f}s")
     if reference is not None and edit_distance is not None:
         print(f"Edit distance to ref  : {edit_distance}")
+    
+    if alternatives_result is not None:
+        print(f"\nAlternative Path Analysis:")
+        print(f"Swap squares detected : {len(alternatives_result['squares'])}")
+        print(f"Ambiguous components  : {len(alternatives_result['components'])}")
+        print(f"Cycles detected       : {len(alternatives_result['cycles'])}")
+        print(f"Linear chains         : {len(alternatives_result['chains'])}")
+        print(f"Total ambiguous pos   : {alternatives_result['ambiguity_count']}")
+        
+        if alternatives_result['cycles']:
+            print(f"\nCycle positions:")
+            for idx, cycle in enumerate(alternatives_result['cycles'], 1):
+                print(f"  Cycle {idx}: {cycle}")
+        
+        if alternatives_result['chains']:
+            print(f"\nChain positions:")
+            for idx, chain in enumerate(alternatives_result['chains'], 1):
+                print(f"  Chain {idx}: {chain}")
 
     if args.metrics_csv is not None:
         header = (

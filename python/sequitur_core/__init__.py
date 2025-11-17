@@ -16,6 +16,13 @@ from .matching import (
     move_row,
     find_lower_diagonal_path,
 )
+from .alternative_paths import (
+    detect_swap_squares,
+    build_swap_graph,
+    find_connected_components,
+    is_cycle,
+    analyse_alternatives,
+)
 
 __all__ = [
     "normalised_damerau_levenshtein_distance",
@@ -28,4 +35,9 @@ __all__ = [
     "move_col",
     "move_row",
     "find_lower_diagonal_path",
+    "detect_swap_squares",
+    "build_swap_graph",
+    "find_connected_components",
+    "is_cycle",
+    "analyse_alternatives",
 ]

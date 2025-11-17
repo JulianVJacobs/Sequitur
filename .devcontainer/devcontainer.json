@@ -13,7 +13,8 @@
 				"ms-azuretools.vscode-docker",
 				"donjayamanne.githistory",
 				"GitHub.copilot",
-				"ms-vscode-remote.remote-ssh"
+				"ms-vscode-remote.remote-ssh",
+				"rust-lang.rust-analyzer"
 			]
 		}
 	},

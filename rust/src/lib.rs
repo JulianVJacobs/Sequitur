@@ -7,6 +7,7 @@
 pub mod suffix;
 pub mod overlap;
 pub mod matching;
+pub mod alternative_paths;
 
 pub use suffix::{
     AffixArray, AffixEntry, AffixKind, DEFAULT_MIN_SUFFIX_LEN,
@@ -25,6 +26,15 @@ pub use matching::{
     relabel_columns,
     relabel_rows,
     find_lower_diagonal_path,
+};
+pub use alternative_paths::{
+    analyse_alternatives,
+    detect_swap_squares,
+    build_swap_graph,
+    find_connected_components,
+    is_cycle,
+    AlternativesAnalysis,
+    SwapSquare,
 };
 
 // TODO: export a compact public API mirroring the Python core
