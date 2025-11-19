@@ -23,30 +23,23 @@ from pathlib import Path
 
 def char_to_dna(char):
     """Map printable ASCII to DNA bases with bijective (1-to-1) encoding."""
+    # Use fixed 4-base codons (4^4 = 256) to represent printable ASCII (95 chars)
     # ASCII 32-126 = 95 printable chars
-    # Use 3-base (4^3=64) for first 64, then 6-base (TTT+3) for remaining 31
-    
+
     code = ord(char)
-    
     if code < 32 or code > 126:
         code = ord('?')
-    
+
     idx = code - 32  # 0-94
     bases = ['A', 'C', 'G', 'T']
-    
-    if idx < 64:
-        # Standard 3-base: covers 0-63
-        b1 = bases[idx // 16]
-        b2 = bases[(idx // 4) % 4]
-        b3 = bases[idx % 4]
-        return b1 + b2 + b3
-    else:
-        # Extended 6-base: TTT + 3 more for 64-94 (31 chars)
-        ext_idx = idx - 64  # 0-30
-        b4 = bases[ext_idx // 16]
-        b5 = bases[(ext_idx // 4) % 4]
-        b6 = bases[ext_idx % 4]
-        return 'TTT' + b4 + b5 + b6
+
+    # Convert idx into 4 base-4 digits: d3 d2 d1 d0 (most-significant first)
+    d0 = idx % 4
+    d1 = (idx // 4) % 4
+    d2 = (idx // 16) % 4
+    d3 = (idx // 64) % 4
+
+    return bases[d3] + bases[d2] + bases[d1] + bases[d0]
 
 
 def text_to_sequence(text):
@@ -61,24 +54,17 @@ def sequence_to_text(seq):
         c = chr(code)
         dna = char_to_dna(c)
         reverse_map[dna] = c
-    
+
     result = []
     i = 0
+    # Decode fixed 4-base codons
     while i < len(seq):
-        # Try 6-base codon first (extended range: TTTxxx)
-        if i + 6 <= len(seq) and seq[i:i+3] == 'TTT':
-            codon = seq[i:i+6]
-            if codon in reverse_map:
-                result.append(reverse_map[codon])
-                i += 6
-                continue
-        
-        # Try 3-base codon
-        if i + 3 <= len(seq):
-            codon = seq[i:i+3]
+        if i + 4 <= len(seq):
+            codon = seq[i:i+4]
             result.append(reverse_map.get(codon, '?'))
-            i += 3
+            i += 4
         else:
+            # leftover bases not forming a full codon
             result.append('?')
             i += 1
     
@@ -183,6 +169,8 @@ def main():
                        help='Insert size for paired reads (default: 500)')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed for reproducibility (default: 42)')
+    parser.add_argument('--ensure-boundaries', action='store_true',
+                       help='Ensure at least one read pair starts at position 0 and one at the end')
     
     args = parser.parse_args()
     
@@ -199,13 +187,42 @@ def main():
     # Convert to DNA
     print("Converting text to DNA sequence...")
     sequence = text_to_sequence(text)
-    print(f"DNA sequence length: {len(sequence)} bases ({len(sequence)//3} codons)")
+    print(f"DNA sequence length: {len(sequence)} bases ({len(sequence)//4} codons)")
     
     # Generate reads
     print(f"Generating reads (length={args.read_length}, coverage={args.coverage}x)...")
     forward_reads, reverse_reads = generate_paired_reads(
         sequence, args.read_length, args.coverage, args.insert_size
     )
+    # Optionally ensure boundary coverage: add deterministic pairs at start and near the end
+    if args.ensure_boundaries:
+        seq_len = len(sequence)
+        # helper to create a pair at a given start
+        def make_pair(start):
+            # forward
+            fwd_end = min(start + args.read_length, seq_len)
+            fwd = sequence[start:fwd_end]
+            # reverse mate
+            rev_start = min(start + args.insert_size, max(0, seq_len - args.read_length))
+            rev_end = min(rev_start + args.read_length, seq_len)
+            rev_seq = sequence[rev_start:rev_end]
+            rev_rc = reverse_complement(rev_seq)
+            if len(fwd) < args.read_length:
+                fwd += 'N' * (args.read_length - len(fwd))
+            if len(rev_rc) < args.read_length:
+                rev_rc += 'N' * (args.read_length - len(rev_rc))
+            return fwd, rev_rc
+
+        # pair at the very start
+        f0, r0 = make_pair(0)
+        # pair near the end: choose start so the forward read and mate fit near the tail
+        end_start = max(0, seq_len - args.insert_size - args.read_length)
+        fend, rend = make_pair(end_start)
+        # prepend start pair and append end pair for deterministic coverage
+        forward_reads.insert(0, f0)
+        reverse_reads.insert(0, r0)
+        forward_reads.append(fend)
+        reverse_reads.append(rend)
     print(f"Generated {len(forward_reads)} read pairs")
     
     # Write outputs

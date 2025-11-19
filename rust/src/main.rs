@@ -51,6 +51,10 @@ struct Args {
     #[arg(long, short = 'v')]
     verbose: bool,
 
+    /// Wrap assembled FASTA lines to this width (0 = no-wrap)
+    #[arg(long, default_value_t = 60)]
+    fasta_line_width: usize,
+
     /// Skip reverse complement of reads2 (for non-genomic or unpaired data)
     #[arg(long)]
     no_revcomp: bool,
@@ -78,6 +82,7 @@ fn main() {
         args.score_gap,
         args.alternatives_json.as_deref(),
         args.verbose,
+        args.fasta_line_width,
         args.no_revcomp,
     ) {
         eprintln!("Assembly failed: {error:?}");
@@ -224,6 +229,7 @@ fn run_pipeline(
     score_gap: Option<f64>,
     alternatives_json: Option<&str>,
     verbose: bool,
+    fasta_line_width: usize,
     no_revcomp: bool,
 ) -> Result<String> {
     let reads1 = read_sequences(Path::new(reads1_path))
@@ -259,7 +265,7 @@ fn run_pipeline(
     }
 
     if verbose {
-        eprintln!(
+        println!(
             "Loaded {} reads ({} from reads1, {} reverse-complemented from reads2)",
             reads.len(),
             reads1_count,
@@ -275,7 +281,7 @@ fn run_pipeline(
 
     let affix = AffixArray::build(&reads, 3);
     if verbose {
-        eprintln!("Built affix array with {} entries", affix.len());
+        println!("Built affix array with {} entries", affix.len());
     }
 
     let config = OverlapConfig::default();
@@ -286,7 +292,7 @@ fn run_pipeline(
     let overlap_csc = overlap_matrix.to_csc();
 
     if verbose {
-        eprintln!("Created adjacency CSC with {} edges", adjacency_csc.nnz());
+        println!("Created adjacency CSC with {} edges", adjacency_csc.nnz());
     }
 
     let assembled = find_lower_diagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
@@ -296,24 +302,24 @@ fn run_pipeline(
         let analysis = analyse_alternatives(&adjacency_csc, score_gap);
 
         if verbose || alternatives_json.is_none() {
-            eprintln!("\nAlternative Path Analysis:");
-            eprintln!("Swap squares detected : {}", analysis.squares.len());
-            eprintln!("Ambiguous components  : {}", analysis.components.len());
-            eprintln!("Cycles detected       : {}", analysis.cycles.len());
-            eprintln!("Linear chains         : {}", analysis.chains.len());
-            eprintln!("Total ambiguous pos   : {}", analysis.ambiguity_count);
+            println!("\nAlternative Path Analysis:");
+            println!("Swap squares detected : {}", analysis.squares.len());
+            println!("Ambiguous components  : {}", analysis.components.len());
+            println!("Cycles detected       : {}", analysis.cycles.len());
+            println!("Linear chains         : {}", analysis.chains.len());
+            println!("Total ambiguous pos   : {}", analysis.ambiguity_count);
 
             if !analysis.cycles.is_empty() {
-                eprintln!("\nCycle positions:");
+                println!("\nCycle positions:");
                 for (idx, cycle) in analysis.cycles.iter().enumerate() {
-                    eprintln!("  Cycle {}: {:?}", idx + 1, cycle);
+                    println!("  Cycle {}: {:?}", idx + 1, cycle);
                 }
             }
 
             if !analysis.chains.is_empty() {
-                eprintln!("\nChain positions:");
+                println!("\nChain positions:");
                 for (idx, chain) in analysis.chains.iter().enumerate() {
-                    eprintln!("  Chain {}: {:?}", idx + 1, chain);
+                    println!("  Chain {}: {:?}", idx + 1, chain);
                 }
             }
         }
@@ -345,7 +351,7 @@ fn run_pipeline(
             writeln!(file, "{}", serde_json::to_string_pretty(&output)?)?;
 
             if verbose {
-                eprintln!("Alternative analysis written to {}", json_path);
+                println!("Alternative analysis written to {}", json_path);
             }
         }
     }
@@ -369,10 +375,20 @@ fn run_pipeline(
                 .to_string_lossy()
         );
         writeln!(fh, ">{header}")?;
-        writeln!(fh, "{assembled}")?;
+        if fasta_line_width == 0 {
+            writeln!(fh, "{assembled}")?;
+        } else {
+            let mut i = 0;
+            let seq_len = assembled.len();
+            while i < seq_len {
+                let end = std::cmp::min(i + fasta_line_width, seq_len);
+                writeln!(fh, "{}", &assembled[i..end])?;
+                i = end;
+            }
+        }
     } else if verbose {
-        println!(
-            ">assembled_from_{}_{}\n{}",
+        let header = format!(
+            ">assembled_from_{}_{}",
             Path::new(reads1_path)
                 .file_name()
                 .unwrap_or_else(|| "reads1".as_ref())
@@ -380,9 +396,20 @@ fn run_pipeline(
             Path::new(reads2_path)
                 .file_name()
                 .unwrap_or_else(|| "reads2".as_ref())
-                .to_string_lossy(),
-            assembled
+                .to_string_lossy()
         );
+        println!("{header}");
+        if fasta_line_width == 0 {
+            println!("{assembled}");
+        } else {
+            let mut i = 0;
+            let seq_len = assembled.len();
+            while i < seq_len {
+                let end = std::cmp::min(i + fasta_line_width, seq_len);
+                println!("{}", &assembled[i..end]);
+                i = end;
+            }
+        }
     }
 
     if let Some(reference_seq) = reference {
@@ -435,6 +462,7 @@ mod smoke {
             None,
             None,
             false,
+            60,
             false,
         );
         assert!(res.is_ok());

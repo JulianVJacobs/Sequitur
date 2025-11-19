@@ -1,0 +1,50 @@
+
+Bootstrap: docker
+From: alpine:3.18
+
+%labels
+    Maintainer Julian Jacobs
+    Version 1.0
+
+%environment
+    export PATH=/root/.cargo/bin:/usr/local/bin:$PATH
+
+%post
+    apk fix && apk add --no-cache \
+        build-base curl git python3 py3-pip python3-dev musl-dev openssl-dev zlib-dev \
+        cmake bash ca-certificates linux-headers pkgconfig make autoconf automake libgcc libstdc++
+
+    # Ensure python3 symlink exists
+    if [ ! -e /usr/bin/python ]; then
+        ln -s /usr/bin/python3 /usr/bin/python
+    fi
+
+    # Install Rust non-interactively
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+    # Ensure cargo is available in this shell for the build step
+    export PATH=/root/.cargo/bin:$PATH
+
+    # Install Python packages commonly used by experiments (adjust as needed)
+    pip3 install --no-cache-dir numpy scipy biopython maturin
+
+    # Clone the repository and build the Rust release binary
+    git clone https://github.com/JulianVJacobs/Sequitur.git /opt/sequitur
+    cd /opt/sequitur/rust
+    /root/.cargo/bin/cargo build --release
+
+    # Install the built binary to a standard location (if present)
+    install -Dm755 target/release/sequitur_rs /usr/local/bin/sequitur_rs || true
+
+    # Copy helper scripts (optional)
+    install -d /opt/sequitur/scripts || true
+    cp -r /opt/sequitur/scripts/* /opt/sequitur/scripts/ 2>/dev/null || true
+
+%runscript
+    exec "$@"
+
+%help
+    This image is based on Alpine and provides the Sequitur experiment environment.
+    It installs build tooling, Rust via rustup, a few Python packages, then clones
+    and builds the project's Rust release binary `sequitur_rs` and installs it to
+    `/usr/local/bin/sequitur_rs` inside the image.

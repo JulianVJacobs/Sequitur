@@ -1,0 +1,7 @@
+error: unexpected argument '--reads1' found
+
+  tip: to pass '--reads1' as a value, use '-- --reads1'
+
+Usage: sequitur_rs [OPTIONS] <READS1> <READS2>
+
+For more information, try '--help'.
