@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use sprs::{indexing::SpIndex, CsMat, TriMat};
 
-use crate::overlap::{Adjacency, OverlapLengths};
+use crate::overlap::Adjacency;
 
 fn argmin_index(values: &[usize]) -> Option<usize> {
     values
@@ -332,6 +332,7 @@ pub fn detect_cycles(adjacency: &Adjacency) -> Vec<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlap::OverlapLengths;
 
     // Helper for tests that still use HashMap format
     fn overlaps_to_csc(overlaps: &OverlapLengths) -> CsMat<usize> {

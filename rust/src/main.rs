@@ -10,7 +10,7 @@ use clap::Parser;
 use flate2::read::MultiGzDecoder;
 
 use sequitur_rs::{
-    adjacency_to_csc, analyse_alternatives, create_overlap_graph, find_lower_diagonal_path,
+    analyse_alternatives, create_overlap_graph, find_lower_diagonal_path,
     AffixArray, OverlapConfig,
 };
 
