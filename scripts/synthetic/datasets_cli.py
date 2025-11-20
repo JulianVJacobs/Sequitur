@@ -38,24 +38,57 @@ BASES = ['A', 'C', 'G', 'T']
 
 def char_to_dna(char: str) -> str:
     code = ord(char)
-    if code < 32 or code > 126:
+    # Allow space (32) and line break (10) to be encoded
+    if code == 10:  # line break '\n'
+        idx = 127 - 32  # use next available codon after printable ASCII
+        d0 = idx % 4
+        d1 = (idx // 4) % 4
+        d2 = (idx // 16) % 4
+        d3 = (idx // 64) % 4
+        return BASES[d3] + BASES[d2] + BASES[d1] + BASES[d0]
+    elif code == 32:  # space
+        idx = code - 32
+        d0 = idx % 4
+        d1 = (idx // 4) % 4
+        d2 = (idx // 16) % 4
+        d3 = (idx // 64) % 4
+        return BASES[d3] + BASES[d2] + BASES[d1] + BASES[d0]
+    elif code < 32 or code > 126:
         code = ord('?')
-    idx = code - 32
-    d0 = idx % 4
-    d1 = (idx // 4) % 4
-    d2 = (idx // 16) % 4
-    d3 = (idx // 64) % 4
-    return BASES[d3] + BASES[d2] + BASES[d1] + BASES[d0]
+        idx = code - 32
+        d0 = idx % 4
+        d1 = (idx // 4) % 4
+        d2 = (idx // 16) % 4
+        d3 = (idx // 64) % 4
+        return BASES[d3] + BASES[d2] + BASES[d1] + BASES[d0]
+    else:
+        idx = code - 32
+        d0 = idx % 4
+        d1 = (idx // 4) % 4
+        d2 = (idx // 16) % 4
+        d3 = (idx // 64) % 4
+        return BASES[d3] + BASES[d2] + BASES[d1] + BASES[d0]
 
 def text_to_sequence(text: str) -> str:
     return ''.join(char_to_dna(c) for c in text)
 
 def build_reverse_map() -> Dict[str, str]:
     reverse = {}
+    # Add space
+    c = chr(32)
+    dna = char_to_dna(c)
+    reverse.setdefault(dna, c)
+    # Add line break
+    c = chr(10)
+    dna = char_to_dna(c)
+    reverse.setdefault(dna, c)
     for code in range(32, 127):
         c = chr(code)
         dna = char_to_dna(c)
         reverse.setdefault(dna, c)
+    # Add line break codon (using next available codon)
+    dna = char_to_dna(chr(10))
+    reverse.setdefault(dna, chr(10))
     return reverse
 
 def decode_sequence(dna_seq: str, reverse_map: Dict[str, str]) -> str:

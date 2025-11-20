@@ -10,8 +10,7 @@ use clap::Parser;
 use flate2::read::MultiGzDecoder;
 
 use sequitur_rs::{
-    analyse_alternatives, create_overlap_graph, find_lower_diagonal_path,
-    AffixArray, OverlapConfig,
+    analyse_alternatives, create_overlap_graph, find_lower_diagonal_path, AffixArray, OverlapConfig,
 };
 
 /// Sequitur Rust CLI (prototype)
@@ -265,11 +264,17 @@ fn run_pipeline(
     }
 
     if verbose {
+        let reads2_label = if no_revcomp {
+            "from reads2"
+        } else {
+            "reverse-complemented from reads2"
+        };
         println!(
-            "Loaded {} reads ({} from reads1, {} reverse-complemented from reads2)",
+            "Loaded {} reads ({} from reads1, {} {})",
             reads.len(),
             reads1_count,
-            reads2_count
+            reads2_count,
+            reads2_label
         );
     }
 
