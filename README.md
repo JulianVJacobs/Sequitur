@@ -84,6 +84,13 @@ python sequitur.py reads1.fastq reads2.fastq \
     --output-fasta results/assembled.fasta \
     --analyse-alternatives \
     --alternatives-json results/alternatives.json
+
+# Unified synthetic dataset utilities (encode/generate/diagnose/validate/decode)
+python ../scripts/synthetic/datasets_cli.py list
+python ../scripts/synthetic/datasets_cli.py generate bee_movie
+python ../scripts/synthetic/datasets_cli.py validate \
+    tests/synthetic/bee_movie/data/reference.fasta \
+    tests/synthetic/bee_movie/results/assembly.fasta
 ```
 
 ### Pure Python (Deprecated, Educational)
@@ -108,6 +115,7 @@ PYTHONPATH=. python sequitur.py \
 - **[docs/RUST_ARCHITECTURE.md](docs/RUST_ARCHITECTURE.md)** – Architecture rationale and migration guide
 - **[python/README.md](python/README.md)** – Python implementation details
 - **[rust/README.md](rust/README.md)** – Rust crate documentation
+- **`scripts/synthetic/datasets_cli.py`** – Unified synthetic dataset CLI (replaces legacy per-function scripts)
 - **`julian jacobs 1605267 masters dissertation.pdf`** – Original thesis with algorithm details
 
 ## Roadmap
@@ -119,6 +127,7 @@ PYTHONPATH=. python sequitur.py \
 - Alternative path detection via swap-square analysis
 - Rust implementation with Python bindings
 - Integration tests and benchmarks
+- Consolidated dataset CLI (completed; deprecates multiple ad-hoc scripts)
 
 🚧 **In Progress**:
 - Performance optimization for large datasets

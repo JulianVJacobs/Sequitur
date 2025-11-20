@@ -68,13 +68,38 @@ python3 scripts/synthetic/validate_assembly.py \
 
 ### Regenerate Large Synthetic Datasets
 
+Use the unified CLI (`datasets_cli.py`) instead of legacy scripts:
+
 ```bash
-# See datasets.yaml for exact parameters
-python3 scripts/synthetic/text_to_fastq.py \
+# List available synthetic datasets
+python3 scripts/synthetic/datasets_cli.py list
+
+# Generate by id (example: bee_movie)
+python3 scripts/synthetic/datasets_cli.py generate bee_movie
+
+# Or encode directly from a source text file
+python3 scripts/synthetic/datasets_cli.py encode \
   tests/synthetic/bee_movie/source.txt \
   tests/synthetic/bee_movie/data \
   --read-length 250 --coverage 50 --insert-size 350 --seed 42 --ensure-boundaries
+
+# Diagnose overlaps
+python3 scripts/synthetic/datasets_cli.py diagnose \
+  tests/synthetic/bee_movie/data/reads_1.fastq \
+  tests/synthetic/bee_movie/data/reads_2.fastq --sample 50
+
+# Validate assembly
+python3 scripts/synthetic/datasets_cli.py validate \
+  tests/synthetic/bee_movie/data/reference.fasta \
+  tests/synthetic/bee_movie/results/assembly.fasta
+
+# Decode assembled DNA back to text
+python3 scripts/synthetic/datasets_cli.py decode \
+  tests/synthetic/bee_movie/results/assembly.fasta \
+  tests/synthetic/bee_movie/results/assembly.txt
 ```
+
+Legacy scripts (`text_to_fastq.py`, `decode_dna_to_text.py`, `diagnose_overlaps.py`, `validate_assembly.py`) remain but are deprecated; prefer the unified CLI for future-proof workflows.
 
 ### Download Real Datasets
 
