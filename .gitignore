@@ -2,8 +2,7 @@
 **/.venv/*
 !**/.venv/requirements.txt
 
-data
-!data/Raphanus sativus_NC_018551.1/*
+# Top-level data directory
 *.slurm
 
 julian jacobs 1605267 masters dissertation.pdf
@@ -11,8 +10,13 @@ julian jacobs 1605267 masters dissertation.pdf
 # ignore the ncbi directory which will be cloned
 .ncbi
 
-/tests/
+# Test structure - keep small fixtures and metadata, ignore large data/results
+tests/*/results/
+tests/synthetic/bee_movie/data/
+tests/real/*/data/
+tests/fixtures/
 !tests/datasets.yaml
+!tests/README.md
 
 *.sif
 
