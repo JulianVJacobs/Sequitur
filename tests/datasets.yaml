@@ -1,0 +1,188 @@
+# Sequitur Test Datasets Registry
+#
+# Structure: tests/{synthetic|real}/{dataset_id}/{data|results}/
+# - Small synthetic datasets (keep_in_repo: true) are committed
+# - Large synthetic datasets (keep_in_repo: false) are generated on-demand
+# - Real datasets are downloaded via provided scripts
+# - All results/ directories are gitignored
+
+synthetic:
+  # Small test cases (kept in repository for CI/quick tests)
+  - id: simple
+    description: "Minimal 16bp test case for quick validation"
+    keep_in_repo: true
+    paths:
+      data_dir: tests/synthetic/simple/data
+      results_dir: tests/synthetic/simple/results
+      reference: tests/synthetic/simple/data/reference.fasta
+      reads:
+        - tests/synthetic/simple/data/reads_1.fastq
+        - tests/synthetic/simple/data/reads_2.fastq
+    stats:
+      reference_length: 16
+      read_pairs: 4
+      read_length: 8
+
+  - id: swap_test
+    description: "Test swap-square detection in alternative paths"
+    keep_in_repo: true
+    paths:
+      data_dir: tests/synthetic/swap_test/data
+      results_dir: tests/synthetic/swap_test/results
+      reference: tests/synthetic/swap_test/data/reference.fasta
+      reads:
+        - tests/synthetic/swap_test/data/reads_1.fastq
+        - tests/synthetic/swap_test/data/reads_2.fastq
+
+  - id: ambiguous
+    description: "Test ambiguous assembly paths"
+    keep_in_repo: true
+    paths:
+      data_dir: tests/synthetic/ambiguous/data
+      results_dir: tests/synthetic/ambiguous/results
+      reference: tests/synthetic/ambiguous/data/reference.fasta
+      reads:
+        - tests/synthetic/ambiguous/data/reads_1.fastq
+        - tests/synthetic/ambiguous/data/reads_2.fastq
+
+  - id: repeats
+    description: "Test repeat resolution"
+    keep_in_repo: true
+    paths:
+      data_dir: tests/synthetic/repeats/data
+      results_dir: tests/synthetic/repeats/results
+      reference: tests/synthetic/repeats/data/reference.fasta
+      reads:
+        - tests/synthetic/repeats/data/reads_1.fastq
+        - tests/synthetic/repeats/data/reads_2.fastq
+
+  - id: reverse_complement
+    description: "Test reverse complement handling"
+    keep_in_repo: true
+    paths:
+      data_dir: tests/synthetic/reverse_complement/data
+      results_dir: tests/synthetic/reverse_complement/results
+      reference: tests/synthetic/reverse_complement/data/reference.fasta
+      reads:
+        - tests/synthetic/reverse_complement/data/reads_1.fastq
+        - tests/synthetic/reverse_complement/data/reads_2.fastq
+
+  - id: with_errors
+    description: "Test assembly with sequencing errors"
+    keep_in_repo: true
+    paths:
+      data_dir: tests/synthetic/with_errors/data
+      results_dir: tests/synthetic/with_errors/results
+      reference: tests/synthetic/with_errors/data/reference.fasta
+      reads:
+        - tests/synthetic/with_errors/data/reads_1.fastq
+        - tests/synthetic/with_errors/data/reads_2.fastq
+
+  # Large synthetic datasets (generated on-demand)
+  - id: bee_movie
+    description: "Bee Movie script encoded as DNA (natural language assembly test)"
+    keep_in_repo: false
+    paths:
+      source: tests/synthetic/bee_movie/source.txt
+      data_dir: tests/synthetic/bee_movie/data
+      results_dir: tests/synthetic/bee_movie/results
+      reference: tests/synthetic/bee_movie/data/reference.fasta
+      reads:
+        - tests/synthetic/bee_movie/data/reads_1.fastq
+        - tests/synthetic/bee_movie/data/reads_2.fastq
+    generator:
+      script: scripts/synthetic/text_to_fastq.py
+      command: |
+        python3 scripts/synthetic/text_to_fastq.py \
+          tests/synthetic/bee_movie/source.txt \
+          tests/synthetic/bee_movie/data \
+          --read-length 250 --coverage 50 --insert-size 350 --seed 42 --ensure-boundaries
+      params:
+        read_length: 250
+        coverage: 50
+        insert_size: 350  # Provides ~100bp mate-pair overlap
+        seed: 42
+        ensure_boundaries: true
+    stats:
+      reference_length: 344200
+      read_pairs: 34422
+      read_length: 250
+    expected_assembly:
+      accuracy_min: 0.95
+      length_tolerance: 0.02
+    notes: |
+      Natural language text converted to DNA using 4-base fixed-width encoding.
+      Tests assembly on realistic but controlled synthetic data.
+
+real:
+real:
+  - id: SRR390728
+    description: "RNA-Seq polyA+ analysis of DLBCL cell line HS0798"
+    experiment: SRX079566
+    biosample: SAMN00797441
+    project: PRJNA145689
+    paths:
+      data_dir: tests/real/SRR390728/data
+      results_dir: tests/real/SRR390728/results
+      reference: tests/real/SRR390728/data/reference.fna.gz
+      reads:
+        - tests/real/SRR390728/data/reads_1.fastq.gz
+        - tests/real/SRR390728/data/reads_2.fastq.gz
+    download:
+      script: scripts/download_dataset.sh
+      args: [SRR390728]
+      reference:
+        url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/329/985/GCF_000329985.1_ASM32998v1/GCF_000329985.1_ASM32998v1_genomic.fna.gz
+        checksum_sha256: f8e56bc894fe8463c23946ee5e85909c770c276bf9430822a98a25b83ac3eaef
+      reads:
+        - url: https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR390/SRR390728/SRR390728_1.fastq.gz
+          checksum_sha256: d53ad4d025e37f4a83169157442f448b32d9b7add78f6818aa629f6146a455cd
+        - url: https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR390/SRR390728/SRR390728_2.fastq.gz
+          checksum_sha256: a6a0dfe2ea43b814e30f21f1cf61e36b2100396e134ec8cf2fec7a704318c03f
+
+  - id: SRR11117158
+      description: "RNA-Seq polyA+ analysis of DLBCL cell line HS0798"
+      experiment: SRX079566
+      biosample: SAMN00797441
+      project: PRJNA145689
+      reads:
+        - path: tests/fixtures/real/SRR390728_1.fastq.gz
+          url: https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR390/SRR390728/SRR390728_1.fastq.gz
+          checksum:
+            type: sha256
+            value: d53ad4d025e37f4a83169157442f448b32d9b7add78f6818aa629f6146a455cd
+        - path: tests/fixtures/real/SRR390728_2.fastq.gz
+          url: https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR390/SRR390728/SRR390728_2.fastq.gz
+          checksum:
+            type: sha256
+            value: a6a0dfe2ea43b814e30f21f1cf61e36b2100396e134ec8cf2fec7a704318c03f
+      reference:
+        path: tests/fixtures/real/GCF_000329985.1_ASM32998v1_genomic.fna.gz
+        accession: GCF_000329985.1
+        url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/329/985/GCF_000329985.1_ASM32998v1/GCF_000329985.1_ASM32998v1_genomic.fna.gz
+        checksum:
+          type: sha256
+          value: f8e56bc894fe8463c23946ee5e85909c770c276bf9430822a98a25b83ac3eaef
+  - id: SRR11117158
+    description: "Raphanus sativus transcriptome sequencing"
+    experiment: SRX7588826
+    biosample: SAMN14305363
+    project: PRJNA610568
+    paths:
+      data_dir: tests/real/SRR11117158/data
+      results_dir: tests/real/SRR11117158/results
+      reference: tests/real/SRR11117158/data/reference.fna.gz
+      reads:
+        - tests/real/SRR11117158/data/reads_1.fastq.gz
+        - tests/real/SRR11117158/data/reads_2.fastq.gz
+    download:
+      script: scripts/download_dataset.sh
+      args: [SRR11117158]
+      reference:
+        url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/019/703/475/GCA_019703475.1_IVFCAAS_Rs00_1.1/GCA_019703475.1_IVFCAAS_Rs00_1.1_genomic.fna.gz
+        checksum_sha256: b254ff40a99933218bf0de933915af36a76b22ab3ecb9a2315d5e4bae47d9096
+      reads:
+        - url: https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR111/058/SRR11117158/SRR11117158_1.fastq.gz
+          checksum_sha256: 7eb4d05c05c9e4080d3a76a78c9f7ea25ec3f676fbe64b8f59c7f91611c3d349
+        - url: https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR111/058/SRR11117158/SRR11117158_2.fastq.gz
+          checksum_sha256: 512481c2bd73595cc0cf79a4f59c7de07c52cf50b27d037f960dd3d80fa2de4d

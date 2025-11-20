@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 def char_to_dna(char):
-    """Same bijective mapping as text_to_fastq.py."""
+    """Same fixed 4-base encoding as text_to_fastq.py."""
     code = ord(char)
     
     if code < 32 or code > 126:
@@ -21,17 +21,12 @@ def char_to_dna(char):
     idx = code - 32
     bases = ['A', 'C', 'G', 'T']
     
-    if idx < 64:
-        b1 = bases[idx // 16]
-        b2 = bases[(idx // 4) % 4]
-        b3 = bases[idx % 4]
-        return b1 + b2 + b3
-    else:
-        ext_idx = idx - 64
-        b4 = bases[ext_idx // 16]
-        b5 = bases[(ext_idx // 4) % 4]
-        b6 = bases[ext_idx % 4]
-        return 'TTT' + b4 + b5 + b6
+    # Fixed 4-base encoding (256 possible values, we use 95 for ASCII 32-126)
+    b1 = bases[idx // 64]
+    b2 = bases[(idx // 16) % 4]
+    b3 = bases[(idx // 4) % 4]
+    b4 = bases[idx % 4]
+    return b1 + b2 + b3 + b4
 
 
 def build_reverse_map():
@@ -49,28 +44,21 @@ def build_reverse_map():
 
 
 def decode_sequence(dna_seq, reverse_map):
-    """Decode DNA sequence to text with variable-length codon support."""
+    """Decode DNA sequence to text with fixed 4-base codon support."""
     result = []
     i = 0
     
     while i < len(dna_seq):
-        # Try 6-base codon first (extended range: TTTxxx)
-        if i + 6 <= len(dna_seq) and dna_seq[i:i+3] == 'TTT':
-            codon = dna_seq[i:i+6]
-            if codon in reverse_map:
-                result.append(reverse_map[codon])
-                i += 6
-                continue
-        
-        # Try 3-base codon
-        if i + 3 <= len(dna_seq):
-            codon = dna_seq[i:i+3]
+        # Fixed 4-base codon
+        if i + 4 <= len(dna_seq):
+            codon = dna_seq[i:i+4]
             if codon in reverse_map:
                 result.append(reverse_map[codon])
             else:
                 result.append('?')
-            i += 3
+            i += 4
         else:
+            # Handle incomplete codon at end
             result.append('?')
             i += 1
     
