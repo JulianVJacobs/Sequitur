@@ -42,7 +42,7 @@ impl Default for OverlapConfig {
 pub fn normalised_damerau_levenshtein_distance(
     suffix: &str,
     prefix: &str,
-) -> Option<(f32, usize, usize)> {
+) -> Option<(f32, f32, usize)> {
     let overlap_len = suffix.len().min(prefix.len());
     if overlap_len == 0 {
         return None;
@@ -57,7 +57,7 @@ pub fn normalised_damerau_levenshtein_distance(
     }
 
     let diff = distance as f32 / overlap_len as f32;
-    let score = overlap_len - distance;
+    let score = 1.0 - diff;
     Some((diff, score, overlap_len))
 }
 
@@ -108,7 +108,7 @@ pub fn create_overlap_graph(
         let read_len = read.len();
 
         // Track best edge per target for this source row to avoid duplicate triplets
-        let mut best_scores: HashMap<usize, usize> = HashMap::new();
+        let mut best_scores: HashMap<usize, f32> = HashMap::new();
         let mut best_spans: HashMap<usize, usize> = HashMap::new();
 
         for span in min_suffix_len..read_len {
@@ -118,6 +118,10 @@ pub fn create_overlap_graph(
                 continue;
             };
 
+            // Forward search with inflection-point boundary crossing
+            let mut min_float_diff_fwd = f32::MAX;
+            let mut found_min_fwd = false;
+            let mut boundary_crossed_fwd = false;
             let mut forward = anchor + 1;
             while forward < affix_array.len() {
                 let entry = affix_array.get(forward).expect("in-bounds forward entry");
@@ -131,18 +135,37 @@ pub fn create_overlap_graph(
                     break;
                 }
 
-                if let Some((diff, score, overlap_len)) =
-                    normalised_damerau_levenshtein_distance(suffix_seq, entry.affix(reads))
-                {
-                    if diff > config.max_diff {
-                        down_cut = true;
-                        break;
-                    }
+                let overlap_len = suffix_seq.len().min(entry.affix(reads).len());
+                if overlap_len == 0 {
+                    forward += 1;
+                    continue;
+                }
+                let suffix_overlap = &suffix_seq[suffix_seq.len() - overlap_len..];
+                let prefix_overlap = &entry.affix(reads)[..overlap_len];
+                let int_edit_distance = damerau_levenshtein(suffix_overlap, prefix_overlap);
+                let float_diff = int_edit_distance as f32 / overlap_len as f32;
 
+                if float_diff < min_float_diff_fwd {
+                    min_float_diff_fwd = float_diff;
+                    found_min_fwd = true;
+                    boundary_crossed_fwd = false;
+                }
+                if found_min_fwd && float_diff >= config.max_diff {
+                    boundary_crossed_fwd = true;
+                }
+                if boundary_crossed_fwd {
+                    break;
+                }
+
+                let score = overlap_len as i32 - int_edit_distance as i32;
+                if overlap_len < read_len {
                     let dst = entry.read_index();
-                    let prev = best_scores.get(&dst).copied().unwrap_or(0);
-                    if score > prev {
-                        best_scores.insert(dst, score);
+                    let prev_score = best_scores.get(&dst).copied().unwrap_or(f32::MIN);
+                    let prev_span = best_spans.get(&dst).copied().unwrap_or(0);
+                    if score as f32 > prev_score
+                        || (score as f32 == prev_score && overlap_len > prev_span)
+                    {
+                        best_scores.insert(dst, score as f32);
                         best_spans.insert(dst, overlap_len);
                     }
                 }
@@ -150,6 +173,10 @@ pub fn create_overlap_graph(
                 forward += 1;
             }
 
+            // Backward search with inflection-point boundary crossing
+            let mut min_float_diff_bwd = f32::MAX;
+            let mut found_min_bwd = false;
+            let mut boundary_crossed_bwd = false;
             let mut backward = anchor as isize - 1;
             while backward >= 0 {
                 let idx = backward as usize;
@@ -164,37 +191,51 @@ pub fn create_overlap_graph(
                     break;
                 }
 
-                if let Some((diff, score, overlap_len)) =
-                    normalised_damerau_levenshtein_distance(suffix_seq, entry.affix(reads))
-                {
-                    if diff > config.max_diff {
-                        up_cut = true;
-                        break;
-                    }
+                let overlap_len = suffix_seq.len().min(entry.affix(reads).len());
+                if overlap_len == 0 {
+                    backward -= 1;
+                    continue;
+                }
+                let suffix_overlap = &suffix_seq[suffix_seq.len() - overlap_len..];
+                let prefix_overlap = &entry.affix(reads)[..overlap_len];
+                let int_edit_distance = damerau_levenshtein(suffix_overlap, prefix_overlap);
+                let float_diff = int_edit_distance as f32 / overlap_len as f32;
 
-                    let dst = entry.read_index();
-                    let prev = best_scores.get(&dst).copied().unwrap_or(0);
-                    if score > prev {
-                        best_scores.insert(dst, score);
-                        best_spans.insert(dst, overlap_len);
-                    }
+                if float_diff < min_float_diff_bwd {
+                    min_float_diff_bwd = float_diff;
+                    found_min_bwd = true;
+                    boundary_crossed_bwd = false;
+                }
+                if found_min_bwd && float_diff >= config.max_diff {
+                    boundary_crossed_bwd = true;
+                }
+                if boundary_crossed_bwd {
+                    break;
+                }
+
+                let score = overlap_len as i32 - int_edit_distance as i32;
+                let dst = entry.read_index();
+                let prev_score = best_scores.get(&dst).copied().unwrap_or(f32::MIN);
+                let prev_span = best_spans.get(&dst).copied().unwrap_or(0);
+                if score as f32 > prev_score
+                    || (score as f32 == prev_score && overlap_len > prev_span)
+                {
+                    best_scores.insert(dst, score as f32);
+                    best_spans.insert(dst, overlap_len);
                 }
 
                 backward -= 1;
             }
-
-            if up_cut && down_cut {
-                break;
-            }
+            // Inflection-point boundary crossing: no early exit, both directions handled above
         }
 
         // Commit best edges for this source row to the sparse matrices (sorted by dst)
-        let mut pairs: Vec<(usize, usize)> = best_scores.into_iter().collect();
+        let mut pairs: Vec<(usize, f32)> = best_scores.into_iter().collect();
         pairs.sort_by_key(|(dst, _)| *dst);
         for (dst, score) in pairs.into_iter() {
             let overlap_len = best_spans.get(&dst).copied().unwrap_or(0);
             a_indices.push(dst);
-            a_data.push(score);
+            a_data.push(score as usize); // If a_data expects usize, consider changing its type to f32 for full precision
             o_indices.push(dst);
             o_data.push(overlap_len);
         }
@@ -246,7 +287,7 @@ mod tests {
         let (diff, score, overlap) =
             normalised_damerau_levenshtein_distance("ACGT", "ACGA").expect("diff");
         assert!((diff - 0.25).abs() < f32::EPSILON);
-        assert_eq!(score, 3);
+        assert_eq!(score, 3.0);
         assert_eq!(overlap, 4);
     }
 

@@ -70,6 +70,19 @@ This generates CSV reports under `data/output/` (mirroring the notebook setup).
 Working with notebooks
 ----------------------
 
+## Notebook Import and Dependency Instructions
+
+When working with Jupyter notebooks in this directory:
+
+- **Place all imports in the first code cell** of the notebook for clarity and reproducibility.
+- **Install any non-standard dependencies** (not in the Python standard library) using an inline pip command in the first cell, e.g.:
+  ```python
+  %pip install matplotlib networkx plotly
+  ```
+- Do **not repeat imports** in subsequent cells; reference only the first cell for all imports.
+
+Refer to this section for best practices when creating or editing notebooks in the Sequitur Python environment.
+
 Launch Jupyter with the virtual environment activated:
 
 ```bash

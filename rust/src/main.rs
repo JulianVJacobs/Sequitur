@@ -1,3 +1,5 @@
+use env_logger;
+use log::{debug, info};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -30,6 +32,10 @@ struct Args {
     #[arg(long)]
     output_fasta: Option<String>,
 
+    /// Optional output file for assembly graph (JSON edge list with node attributes)
+    #[arg(long)]
+    export_graph_json: Option<String>,
+
     /// Optional CSV file to append assembly metrics (reserved for future use)
     #[arg(long)]
     metrics_csv: Option<String>,
@@ -46,9 +52,17 @@ struct Args {
     #[arg(long)]
     alternatives_json: Option<String>,
 
-    /// Verbose output (default: quiet)
-    #[arg(long, short = 'v')]
+    /// Verbose/info output (default: quiet)
+    #[arg(long, short = 'v', alias = "info")]
     verbose: bool,
+
+    /// Debug output
+    #[arg(long)]
+    debug: bool,
+
+    /// Trace output
+    #[arg(long)]
+    trace: bool,
 
     /// Wrap assembled FASTA lines to this width (0 = no-wrap)
     #[arg(long, default_value_t = 60)]
@@ -57,19 +71,33 @@ struct Args {
     /// Skip reverse complement of reads2 (for non-genomic or unpaired data)
     #[arg(long)]
     no_revcomp: bool,
+
+    /// Optimise swap squares for maximal diagonal sum (deterministic)
+    #[arg(long)]
+    optimise_diagonal: bool,
 }
 
 fn main() {
-    env_logger::init();
+    log::info!("[LOGGER TEST] Logger initialized and output visible at info level");
     let args = Args::parse();
+    // Set log level based on CLI flags
+    let log_level = if args.trace {
+        "trace"
+    } else if args.debug {
+        "debug"
+    } else if args.verbose {
+        "info"
+    } else {
+        "error"
+    };
+    std::env::set_var("RUST_LOG", log_level);
+    env_logger::init();
 
-    if args.verbose {
-        println!("Sequitur Rust prototype");
-        println!("reads1: {}", args.reads1);
-        println!("reads2: {}", args.reads2);
-        if let Some(refp) = &args.reference {
-            println!("reference: {}", refp);
-        }
+    info!("Sequitur Rust prototype");
+    info!("reads1: {}", args.reads1);
+    info!("reads2: {}", args.reads2);
+    if let Some(refp) = &args.reference {
+        info!("reference: {}", refp);
     }
 
     if let Err(error) = run_pipeline(
@@ -83,6 +111,8 @@ fn main() {
         args.verbose,
         args.fasta_line_width,
         args.no_revcomp,
+        args.export_graph_json.as_deref(),
+        args.optimise_diagonal,
     ) {
         eprintln!("Assembly failed: {error:?}");
         std::process::exit(1);
@@ -230,6 +260,8 @@ fn run_pipeline(
     verbose: bool,
     fasta_line_width: usize,
     no_revcomp: bool,
+    export_graph_json: Option<&str>,
+    optimise_diagonal: bool,
 ) -> Result<String> {
     let reads1 = read_sequences(Path::new(reads1_path))
         .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
@@ -237,23 +269,69 @@ fn run_pipeline(
         .with_context(|| format!("Failed to parse reads from {}", reads2_path))?;
 
     let reads2 = if no_revcomp {
-        if verbose {
-            println!("Skipping reverse complement (--no-revcomp flag)");
-        }
+        info!("Skipping reverse complement (--no-revcomp flag)");
         reads2_raw
     } else {
-        if verbose {
-            println!("Applying reverse complement to reads2");
-        }
+        info!("Applying reverse complement to reads2");
         reverse_complement_all(reads2_raw)?
     };
 
     let reads1_count = reads1.len();
     let reads2_count = reads2.len();
-
     let mut reads = Vec::with_capacity(reads1_count + reads2_count);
-    reads.extend(reads1);
-    reads.extend(reads2);
+    reads.extend(reads1.iter().cloned());
+    reads.extend(reads2.iter().cloned());
+    // Build affix array and overlap graph
+    let affix = AffixArray::build(&reads, 3);
+    debug!("[AFFIX] array built: {} entries", affix.len());
+    for (i, entry) in affix.iter().enumerate() {
+        let kind = match entry.kind() {
+            sequitur_rs::suffix::AffixKind::Suffix => "suffix",
+            sequitur_rs::suffix::AffixKind::Prefix => "prefix",
+        };
+    }
+
+    let config = OverlapConfig {
+        ..OverlapConfig::default()
+    };
+    let (_affix_array, mut adjacency_matrix, _overlap_matrix) =
+        create_overlap_graph(&reads, Some(affix), config);
+
+    // If requested, optimise swap squares for maximal diagonal sum
+    if optimise_diagonal {
+        use sequitur_rs::alternative_paths::{detect_swap_squares, optimise_diagonal_sum};
+        let squares = detect_swap_squares(&adjacency_matrix, None);
+        optimise_diagonal_sum(&mut adjacency_matrix, &squares);
+        info!(
+            "Applied maximal diagonal optimisation over {} swap squares.",
+            squares.len()
+        );
+    }
+
+    // Export full assembly graph as JSON edge list with node attributes
+    if let Some(graph_path) = export_graph_json {
+        use serde_json::json;
+        use std::io::Write;
+        if let Some(parent) = std::path::Path::new(graph_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let mut nodes = Vec::new();
+        for (idx, read) in reads.iter().enumerate() {
+            nodes.push(json!({"id": idx, "sequence": read}));
+        }
+        let mut edges = Vec::new();
+        for (row_idx, row_vec) in adjacency_matrix.outer_iterator().enumerate() {
+            for (col_idx, &weight) in row_vec.indices().iter().zip(row_vec.data().iter()) {
+                edges.push(json!({"source": row_idx, "target": col_idx, "weight": weight}));
+            }
+        }
+        let graph_json = json!({"nodes": nodes, "edges": edges});
+        let mut file = std::fs::File::create(graph_path)?;
+        writeln!(file, "{}", serde_json::to_string_pretty(&graph_json)?)?;
+        info!("Assembly graph written to {}", graph_path);
+    }
 
     if reads.is_empty() {
         bail!(
@@ -263,20 +341,18 @@ fn run_pipeline(
         );
     }
 
-    if verbose {
-        let reads2_label = if no_revcomp {
-            "from reads2"
-        } else {
-            "reverse-complemented from reads2"
-        };
-        println!(
-            "Loaded {} reads ({} from reads1, {} {})",
-            reads.len(),
-            reads1_count,
-            reads2_count,
-            reads2_label
-        );
-    }
+    let reads2_label = if no_revcomp {
+        "from reads2"
+    } else {
+        "reverse-complemented from reads2"
+    };
+    info!(
+        "Loaded {} reads ({} from reads1, {} {})",
+        reads.len(),
+        reads1_count,
+        reads2_count,
+        reads2_label
+    );
 
     let reference = if let Some(path) = reference_path {
         load_reference(Path::new(path))?
@@ -285,59 +361,49 @@ fn run_pipeline(
     };
 
     let affix = AffixArray::build(&reads, 3);
-    if verbose {
-        println!("Built affix array with {} entries", affix.len());
-    }
+    info!("Built affix array with {} entries", affix.len());
 
-    let config = OverlapConfig::default();
+    let config = OverlapConfig {
+        ..OverlapConfig::default()
+    };
     let (_affix_array, adjacency_matrix, overlap_matrix) =
         create_overlap_graph(&reads, Some(affix), config);
 
     let adjacency_csc = adjacency_matrix.to_csc();
     let overlap_csc = overlap_matrix.to_csc();
 
-    if verbose {
-        println!("Created adjacency CSC with {} edges", adjacency_csc.nnz());
-    }
+    debug!(
+        "[DEBUG] Created adjacency CSC with {} edges",
+        adjacency_csc.nnz()
+    );
 
+    debug!("[DEBUG] Overlap matrix:");
+    for (i, row) in overlap_matrix.outer_iterator().enumerate() {
+        debug!("[DEBUG] row {}: {:?}", i, row.data());
+    }
     let assembled = find_lower_diagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
+    debug!("[DEBUG] Assembly path: {:?}", assembled);
 
     // Analyse alternative paths if requested
     if analyse_alts {
         let analysis = analyse_alternatives(&adjacency_csc, score_gap);
-
-        if verbose || alternatives_json.is_none() {
-            println!("\nAlternative Path Analysis:");
-            println!("Swap squares detected : {}", analysis.squares.len());
-            println!("Ambiguous components  : {}", analysis.components.len());
-            println!("Cycles detected       : {}", analysis.cycles.len());
-            println!("Linear chains         : {}", analysis.chains.len());
-            println!("Total ambiguous pos   : {}", analysis.ambiguity_count);
-
-            if !analysis.cycles.is_empty() {
-                println!("\nCycle positions:");
-                for (idx, cycle) in analysis.cycles.iter().enumerate() {
-                    println!("  Cycle {}: {:?}", idx + 1, cycle);
-                }
-            }
-
-            if !analysis.chains.is_empty() {
-                println!("\nChain positions:");
-                for (idx, chain) in analysis.chains.iter().enumerate() {
-                    println!("  Chain {}: {:?}", idx + 1, chain);
-                }
-            }
+        info!("[ALT] Swap squares detected: {}", analysis.squares.len());
+        info!("[ALT] Cycles detected: {}", analysis.cycles.len());
+        info!("[ALT] Linear chains: {}", analysis.chains.len());
+        info!("[ALT] Total ambiguous pos: {}", analysis.ambiguity_count);
+        if !analysis.cycles.is_empty() {
+            debug!("[ALT] Cycle positions: {:?}", analysis.cycles);
         }
-
+        if !analysis.chains.is_empty() {
+            debug!("[ALT] Chain positions: {:?}", analysis.chains);
+        }
         if let Some(json_path) = alternatives_json {
             use serde_json::json;
-
             let squares_json: Vec<_> = analysis
                 .squares
                 .iter()
                 .map(|sq| json!({"i": sq.i, "j": sq.j, "delta": sq.delta}))
                 .collect();
-
             let output = json!({
                 "squares": squares_json,
                 "components": analysis.components,
@@ -345,19 +411,14 @@ fn run_pipeline(
                 "chains": analysis.chains,
                 "ambiguity_count": analysis.ambiguity_count,
             });
-
             if let Some(parent) = Path::new(json_path).parent() {
                 if !parent.as_os_str().is_empty() {
                     std::fs::create_dir_all(parent)?;
                 }
             }
-
             let mut file = File::create(json_path)?;
             writeln!(file, "{}", serde_json::to_string_pretty(&output)?)?;
-
-            if verbose {
-                println!("Alternative analysis written to {}", json_path);
-            }
+            info!("[ALT] Alternative analysis written to {}", json_path);
         }
     }
 
@@ -403,15 +464,15 @@ fn run_pipeline(
                 .unwrap_or_else(|| "reads2".as_ref())
                 .to_string_lossy()
         );
-        println!("{header}");
+        info!("{header}");
         if fasta_line_width == 0 {
-            println!("{assembled}");
+            info!("{assembled}");
         } else {
             let mut i = 0;
             let seq_len = assembled.len();
             while i < seq_len {
                 let end = std::cmp::min(i + fasta_line_width, seq_len);
-                println!("{}", &assembled[i..end]);
+                info!("{}", &assembled[i..end]);
                 i = end;
             }
         }
@@ -420,20 +481,20 @@ fn run_pipeline(
     if let Some(reference_seq) = reference {
         const MAX_DISTANCE_LEN: usize = 20_000;
         if assembled == reference_seq {
-            println!(
+            info!(
                 "Assembled contig matches the reference sequence exactly ({} bp).",
                 assembled.len()
             );
         } else if assembled.len() <= MAX_DISTANCE_LEN && reference_seq.len() <= MAX_DISTANCE_LEN {
             let distance = levenshtein(assembled.as_bytes(), reference_seq.as_bytes());
-            println!(
+            info!(
                 "Edit distance to reference (len {} vs {}): {}",
                 assembled.len(),
                 reference_seq.len(),
                 distance
             );
         } else {
-            println!(
+            info!(
                 "Reference check skipped: assembled length {} or reference length {} exceeds {} bp threshold.",
                 assembled.len(),
                 reference_seq.len(),
@@ -468,6 +529,8 @@ mod smoke {
             None,
             false,
             60,
+            false,
+            None,
             false,
         );
         assert!(res.is_ok());

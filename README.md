@@ -110,14 +110,11 @@ PYTHONPATH=. python sequitur.py \
 
 ## Documentation
 
-- **[docs/README.md](docs/README.md)** – Complete documentation index
-- **[docs/ALTERNATIVE_PATHS.md](docs/ALTERNATIVE_PATHS.md)** – Alternative path detection theory and usage
-- **[docs/RUST_ARCHITECTURE.md](docs/RUST_ARCHITECTURE.md)** – Architecture rationale and migration guide
-- **[python/README.md](python/README.md)** – Python implementation details
-- **[rust/README.md](rust/README.md)** – Rust crate documentation
-- **`scripts/synthetic/datasets_cli.py`** – Unified synthetic dataset CLI (replaces legacy per-function scripts)
-- **`julian jacobs 1605267 masters dissertation.pdf`** – Original thesis with algorithm details
 
+**Documentation Rules:**
+- Any documentation markdown file should be named `README.md` if it is intended as the primary doc for a directory. In this case, it must be added to the index of a nearby `README.md` at any level above it (e.g., parent directory README.md should link to child README.md).
+- If the documentation markdown file is named something else, it must be placed in the `docs/` directory and added to the index in `docs/README.md`.
+- Every `README.md` that refers to another document must be part of a connected graph of README documents. That is, every README in the workspace should form a connected network, ensuring discoverability and navigability throughout the documentation hierarchy.
 ## Roadmap
 
 ✅ **Completed**:

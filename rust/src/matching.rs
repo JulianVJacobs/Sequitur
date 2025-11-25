@@ -1,10 +1,36 @@
-//! Sequence reconstruction helpers.
-
+/// Swap two rows and columns in a TriMat sparse matrix.
+pub fn swap_rows_and_cols(matrix: &mut TriMat<usize>, i: usize, j: usize) {
+    let triplets: Vec<(usize, usize, usize)> = matrix
+        .triplet_iter()
+        .map(|(value, (row, col))| (row.index(), col.index(), *value))
+        .collect();
+    let mut updated = TriMat::with_capacity(matrix.shape(), triplets.len());
+    for (row, col, value) in triplets {
+        let new_row = if row == i {
+            j
+        } else if row == j {
+            i
+        } else {
+            row
+        };
+        let new_col = if col == i {
+            j
+        } else if col == j {
+            i
+        } else {
+            col
+        };
+        updated.add_triplet(new_row, new_col, value);
+    }
+    *matrix = updated;
+}
+/// Sequence reconstruction helpers.
 use std::collections::{HashMap, HashSet};
 
 use sprs::{indexing::SpIndex, CsMat, TriMat};
 
 use crate::overlap::Adjacency;
+use log::debug; // Import log::debug to resolve missing macro errors
 
 fn argmin_index(values: &[usize]) -> Option<usize> {
     values
@@ -90,8 +116,18 @@ pub fn find_lower_diagonal_path(
     matrix: &CsMat<usize>,
     overlap_csc: &CsMat<usize>,
     reads: &[String],
-    qualities: Option<&[Vec<i32>]>,
+    _qualities: Option<&[Vec<i32>]>,
 ) -> String {
+    // Print overlap matrix for debugging
+    debug!("[DEBUG] Overlap matrix:");
+    for i in 0..reads.len() {
+        let mut row = Vec::new();
+        for j in 0..reads.len() {
+            let val = overlap_csc.get(i, j).copied().unwrap_or(0);
+            row.push(val);
+        }
+        debug!("[DEBUG] row {}: {:?}", i, row);
+    }
     if reads.is_empty() {
         return String::new();
     }
@@ -201,35 +237,39 @@ pub fn find_lower_diagonal_path(
         return String::new();
     }
 
+    // Print the final sorted overlap matrix in path order
+    debug!("[DEBUG] Final sorted overlap matrix (path order):");
+    for &row_idx in &path {
+        let mut row = Vec::new();
+        for &col_idx in &path {
+            let val = overlap_csc.get(row_idx, col_idx).copied().unwrap_or(0);
+            row.push(val);
+        }
+        debug!("[DEBUG] row {}: {:?}", row_idx, row);
+    }
+
     let mut sequence: Vec<u8> = Vec::new();
     sequence.extend_from_slice(reads[path[0]].as_bytes());
 
+    debug!("[DEBUG] Assembly path: {:?}", path);
     for window in path.windows(2) {
         let prev = window[0];
         let next = window[1];
         let overlap_len = overlap_csc.get(prev, next).copied().unwrap_or(0);
         let overlap_len = overlap_len.min(reads[prev].len()).min(reads[next].len());
-
-        if let Some(all_qualities) = qualities {
-            let prev_q = &all_qualities[prev];
-            let next_q = &all_qualities[next];
-            let prev_start = prev_q.len().saturating_sub(overlap_len);
-            for idx in 0..overlap_len {
-                let seq_idx = sequence.len().saturating_sub(overlap_len) + idx;
-                let prev_quality = prev_q.get(prev_start + idx).copied().unwrap_or(0);
-                let next_quality = next_q.get(idx).copied().unwrap_or(0);
-                if next_quality > prev_quality {
-                    if let Some(&base) = reads[next].as_bytes().get(idx) {
-                        if seq_idx < sequence.len() {
-                            sequence[seq_idx] = base;
-                        }
-                    }
-                }
-            }
-        }
-
+        debug!(
+            "[DEBUG] Transition: {} -> {} | overlap_len: {}",
+            prev, next, overlap_len
+        );
+        debug!("[DEBUG] prev read [{}]: {}", prev, reads[prev]);
+        debug!("[DEBUG] next read [{}]: {}", next, reads[next]);
         if overlap_len < reads[next].len() {
-            sequence.extend_from_slice(&reads[next].as_bytes()[overlap_len..]);
+            let slice = &reads[next][overlap_len..];
+            debug!(
+                "[DEBUG] Appending slice [{}][{}..]: {}",
+                next, overlap_len, slice
+            );
+            sequence.extend_from_slice(slice.as_bytes());
         }
     }
 

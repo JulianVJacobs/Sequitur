@@ -1,5 +1,12 @@
+**Notebook Context**: `python/sequitur.ipynb` and `python/results.ipynb` document algorithmic intent; they may import deprecated Python code—update to use `sequitur_rs` when possible.
+
+**Notebook Rules**:
+ - For full instructions and best practices, refer to `python/README.md`.
+ 
+ **Documentation Rules:**
+ Refer to the root `README.md` for documentation rules regarding markdown file naming, placement, and indexing. The root README.md serves as the canonical index for all further instructions and rules.
 **Sequitur Agent Guide**
-- **Localisation**: Follow South African English (`en-ZA`) spelling in identifiers, comments, and user-facing text (e.g., "colour", "optimise"); audit and correct deviations when touching affected files.
+**Terminal Command Directory Rule**: Always run shell commands using the pattern `(cd /desired/path && command ...)` to ensure the correct working directory is used. This avoids confusion and errors from manual `cd` changes, and always falls back to the workspace root if not specified. Never rely on the current terminal directory state.
 - **Architecture**: Rust implementation in `rust/` is the primary codebase; Python in `python/` is deprecated for core algorithms but maintained for prototyping and notebooks—prefer Rust with PyO3 bindings for production; see `docs/RUST_ARCHITECTURE.md` for rationale and migration guide.
 - **Alternative Paths**: `alternative_paths.rs` implements swap-square detection; pure Python version in `sequitur_core/alternative_paths.py` is deprecated—direct new code to use `sequitur_rs.analyse_alternative_paths()`.
 - **Documentation**: All feature docs live in `docs/` with `docs/README.md` as index; implementation-specific docs stay in language subdirs (`python/README.md`, `rust/README.md`); update root `README.md` only for quick-start or roadmap changes.
@@ -15,6 +22,7 @@
 - **Rust Modules**: `suffix.rs`, `overlap.rs`, `matching.rs`, `alternative_paths.rs` are the canonical implementations; keep public APIs stable and exported via `lib.rs` for PyO3 bindings.
 - **Rust CLI**: `cargo run -- <reads1> <reads2> --output-fasta out.fasta` ingests `.fastq[.gz]` or `.fasta[.gz]` pairs, reverse-complements `reads2`, supports `--analyse-alternatives` and `--reference` for validation.
 - **Rust Tests**: `cargo test` exercises all modules including alternative path detection; add Rust tests for new features—they're the authoritative test suite.
+	For all test directory structure, dataset generation, and test running instructions, refer to `tests/README.md`.
 - **Python ↔ Rust Bridge**: `rust/src/python_bindings.rs` exposes `assemble_from_reads`, `analyse_reads`, and `analyse_alternative_paths` via PyO3; maintain API compatibility when updating Rust signatures.
 - **Integration Workflow**: `scripts/integration/run_integration.sh` compares Rust and Python assemblies over `tests/fixtures/*.fastq`; ensure the Rust binary exists before running.
 - **Results Storage**: Both pipelines write FASTA outputs under `tests/results/`; avoid hard-coding paths so integration tests discover artifacts automatically.

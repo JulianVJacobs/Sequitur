@@ -198,13 +198,15 @@ def generate_paired(sequence: str, read_length: int, coverage: int, insert_size:
             if len(rev_rc) < read_length:
                 rev_rc += 'N' * (read_length - len(rev_rc))
             return fwd, rev_rc
+        # Always include a read starting at position 0 (initus)
         f0, r0 = make_pair(0)
-        end_start = max(0, seq_len - insert_size - read_length)
-        fe, re = make_pair(end_start)
         forward.insert(0, f0)
         reverse.insert(0, r0)
-        forward.append(fe)
-        reverse.append(re)
+        # Always include a read starting at the last possible position (terminus)
+        last_start = max(0, seq_len - read_length)
+        fl, rl = make_pair(last_start)
+        forward.append(fl)
+        reverse.append(rl)
     return forward, reverse
 
 # ----------------------------- Overlap diagnosis -----------------------------
@@ -327,6 +329,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description='Unified synthetic dataset utilities')
     sub = p.add_subparsers(dest='cmd', required=True)
     # encode
+    # generate-reads (plain text, no encoding)
+    pgr = sub.add_parser('generate-reads', help='Generate synthetic reads from a plain text file (no encoding)')
+    pgr.add_argument('input', type=Path)
+    pgr.add_argument('output_dir', type=Path)
+    pgr.add_argument('--read-length', type=int, default=150)
+    pgr.add_argument('--coverage', type=int, default=30)
+    pgr.add_argument('--insert-size', type=int, default=500)
+    pgr.add_argument('--seed', type=int, default=42)
+    pgr.add_argument('--ensure-boundaries', action='store_true')
+    # encode
     pe = sub.add_parser('encode', help='Convert text to DNA + paired reads')
     pe.add_argument('input', type=Path)
     pe.add_argument('output_dir', type=Path)
@@ -363,6 +375,19 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     cmd = args.cmd
+    if cmd == 'generate-reads':
+        # Read input, skip FASTA headers, and concatenate only sequence lines
+        with open(args.input, 'r') as f:
+            seq_lines = [line.strip() for line in f if not line.startswith('>')]
+        text = ''.join(seq_lines)
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        # Use plain text for read generation
+        fwd, rev = generate_paired(text, args.read_length, args.coverage, args.insert_size, args.ensure_boundaries, args.seed)
+        # Write FASTQ files
+        write_fastq(fwd, args.output_dir / 'reads_1.fastq', '1')
+        write_fastq(rev, args.output_dir / 'reads_2.fastq', '2')
+        print(f"Read generation complete. Reads sampled from input file in {args.output_dir}")
+        return 0
     if cmd == 'encode':
         text = args.input.read_text()
         dna = text_to_sequence(text)

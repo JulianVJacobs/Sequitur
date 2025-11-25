@@ -1,5 +1,9 @@
 # Sequitur Test Datasets
 
+## Test Directory Overview
+
+This directory contains all test datasets and test workflows for the Sequitur assembler. It supports both synthetic and real datasets, and provides instructions for adding new tests, generating datasets, and running validation workflows. Agents and contributors should refer to this README for all test-related procedures.
+
 This directory contains all test datasets for the Sequitur assembler.
 
 ## Structure
@@ -47,6 +51,41 @@ Downloaded from public repositories (SRA, NCBI):
 - **SRR11117158** - Raphanus sativus transcriptome
 
 ## Usage
+
+## Adding New Tests
+
+1. **Synthetic Datasets**: Add a new subdirectory under `tests/synthetic/{dataset_id}/data/` and place your reference and paired-end reads there. Register the dataset in `datasets.yaml`.
+2. **Real Datasets**: Add a new subdirectory under `tests/real/{dataset_id}/data/` and place downloaded data there. Update `datasets.yaml` as needed.
+3. **Results**: All outputs (assemblies, metrics, alternatives) should be written to `results/` under the relevant dataset directory. Results are gitignored.
+
+## Generating Datasets
+
+Use the unified CLI (`scripts/synthetic/datasets_cli.py`) for synthetic dataset generation, encoding, diagnosis, and validation. See command examples below and in `datasets.yaml` for specific options.
+
+## Running Tests
+
+### Rust Unit Tests
+Run all Rust unit and integration tests:
+```bash
+cargo test --all --release
+```
+This exercises all core modules, including alternative path detection and matching correctness.
+
+### Python Legacy Tests
+Run legacy Python tests (deprecated, for regression only):
+```bash
+python3 -m unittest discover python/sequitur_core/tests/
+```
+
+### Integration Tests
+Run the full integration workflow to compare Rust and Python assemblies:
+```bash
+bash scripts/integration/run_integration.sh
+```
+This script will automatically discover test fixtures and compare outputs.
+
+### Validating Assemblies
+Use the provided validation scripts or CLI to check assembly correctness against references. See examples above and in `datasets.yaml`.
 
 ### Run Assembly on a Dataset
 
@@ -111,6 +150,10 @@ bash scripts/download_dataset.sh {dataset_id}
 ```
 
 ## Migration from Old Structure
+
+## Agent Reference
+
+Agents and contributors: Always refer to this README for up-to-date instructions on adding, generating, and running tests. For dataset structure, workflow, and troubleshooting, this is the canonical source.
 
 The old `tests/fixtures/` structure has been reorganized:
 - Small synthetic tests → `tests/synthetic/{dataset}/data/`

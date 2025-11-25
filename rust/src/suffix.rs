@@ -6,7 +6,7 @@ const INVALID_ANCHOR: usize = usize::MAX;
 pub const DEFAULT_MIN_SUFFIX_LEN: usize = 3;
 
 /// Distinguishes between suffix and (reverse) prefix entries when sorting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum AffixKind {
     /// A suffix extracted from the tail of a read.
     Suffix,
@@ -16,6 +16,7 @@ pub enum AffixKind {
 
 impl AffixKind {
     #[inline]
+    #[allow(dead_code)]
     fn marker(self) -> char {
         match self {
             Self::Suffix => '$',
@@ -169,10 +170,31 @@ impl Default for AffixArray {
 }
 
 fn compare_entries(lhs: &AffixEntry, rhs: &AffixEntry, reads: &[String]) -> Ordering {
-    decorated_bytes(lhs, reads).cmp(decorated_bytes(rhs, reads))
+    let lhs_seq = lhs.affix(reads).as_bytes();
+    let rhs_seq = rhs.affix(reads).as_bytes();
+    match lhs_seq.cmp(rhs_seq) {
+        Ordering::Equal => {
+            // Shorter sequence first
+            match lhs_seq.len().cmp(&rhs_seq.len()) {
+                Ordering::Equal => {
+                    // Suffix before prefix
+                    match Ord::cmp(&lhs.kind(), &rhs.kind()) {
+                        Ordering::Equal => lhs.read_index().cmp(&rhs.read_index()),
+                        ord => ord,
+                    }
+                }
+                ord => ord,
+            }
+        }
+        ord => ord,
+    }
 }
 
-fn decorated_bytes<'a>(entry: &'a AffixEntry, reads: &'a [String]) -> impl Iterator<Item = u8> + 'a {
+#[allow(dead_code)]
+fn decorated_bytes<'a>(
+    entry: &'a AffixEntry,
+    reads: &'a [String],
+) -> impl Iterator<Item = u8> + 'a {
     entry
         .affix(reads)
         .bytes()
@@ -180,6 +202,7 @@ fn decorated_bytes<'a>(entry: &'a AffixEntry, reads: &'a [String]) -> impl Itera
         .chain(IndexDigits::new(entry.read_index()))
 }
 
+#[allow(dead_code)]
 struct IndexDigits {
     buf: [u8; 20],
     pos: usize,
@@ -187,6 +210,7 @@ struct IndexDigits {
 }
 
 impl IndexDigits {
+    #[allow(dead_code)]
     fn new(mut value: usize) -> Self {
         let mut buf = [0u8; 20];
         let mut idx = buf.len();
@@ -224,11 +248,16 @@ impl Iterator for IndexDigits {
 
 impl AffixArray {
     pub fn suffix_anchor(&self, read_index: usize, start: usize) -> Option<usize> {
-        self
-            .suffix_anchors
+        self.suffix_anchors
             .get(read_index)
             .and_then(|row| row.get(start))
-            .and_then(|&idx| if idx == INVALID_ANCHOR { None } else { Some(idx) })
+            .and_then(|&idx| {
+                if idx == INVALID_ANCHOR {
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
     }
 }
 
@@ -243,7 +272,14 @@ mod tests {
 
         let keys: Vec<String> = array
             .iter()
-            .map(|entry| format!("{}{}{}", entry.affix(&reads), entry.kind().marker(), entry.read_index()))
+            .map(|entry| {
+                format!(
+                    "{}{}{}",
+                    entry.affix(&reads),
+                    entry.kind().marker(),
+                    entry.read_index()
+                )
+            })
             .collect();
         assert_eq!(keys, vec!["ACGT$0", "ACGT^0", "ACG^0", "CGT$0"]);
 
@@ -272,7 +308,14 @@ mod tests {
 
         let keys: Vec<String> = array
             .iter()
-            .map(|entry| format!("{}{}{}", entry.affix(&reads), entry.kind().marker(), entry.read_index()))
+            .map(|entry| {
+                format!(
+                    "{}{}{}",
+                    entry.affix(&reads),
+                    entry.kind().marker(),
+                    entry.read_index()
+                )
+            })
             .collect();
         assert!(keys.iter().all(|key| key.ends_with('1')));
     }
@@ -285,12 +328,12 @@ mod tests {
 
         assert!(array.suffix_anchor(0, 2).is_some()); // CGT suffix
         assert!(array.suffix_anchor(0, 3).is_some()); // GT suffix
-        assert!(array
-            .iter()
-            .any(|entry| entry.kind() == AffixKind::Prefix && entry.read_index() == 0 && entry.span() == 5));
-        assert!(array
-            .iter()
-            .any(|entry| entry.kind() == AffixKind::Prefix && entry.read_index() == 0 && entry.span() == 2));
+        assert!(array.iter().any(|entry| entry.kind() == AffixKind::Prefix
+            && entry.read_index() == 0
+            && entry.span() == 5));
+        assert!(array.iter().any(|entry| entry.kind() == AffixKind::Prefix
+            && entry.read_index() == 0
+            && entry.span() == 2));
     }
 
     #[test]
@@ -299,8 +342,8 @@ mod tests {
         let array = AffixArray::build(&reads, 0);
         assert_eq!(array.len(), 4);
         assert!(array.suffix_anchor(0, 0).is_some());
-        assert!(array
-            .iter()
-            .any(|entry| entry.kind() == AffixKind::Prefix && entry.read_index() == 0 && entry.span() == 1));
+        assert!(array.iter().any(|entry| entry.kind() == AffixKind::Prefix
+            && entry.read_index() == 0
+            && entry.span() == 1));
     }
 }
