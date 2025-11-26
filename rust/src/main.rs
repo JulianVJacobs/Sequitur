@@ -462,13 +462,13 @@ fn run_pipeline(
         );
         info!("{header}");
         if fasta_line_width == 0 {
-            info!("{assembled}");
+            debug!("{assembled}");
         } else {
             let mut i = 0;
             let seq_len = assembled.len();
             while i < seq_len {
                 let end = std::cmp::min(i + fasta_line_width, seq_len);
-                info!("{}", &assembled[i..end]);
+                debug!("{}", &assembled[i..end]);
                 i = end;
             }
         }
