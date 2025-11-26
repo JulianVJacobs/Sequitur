@@ -9,15 +9,6 @@ Subcommands:
   diagnose    Diagnose overlaps in paired FASTQ reads
   list        List synthetic datasets from tests/datasets.yaml
 
-Rationale:
-  Consolidates previously separate scripts:
-    - text_to_fastq.py (encode)
-    - decode_dna_to_text.py (decode)
-    - validate_assembly.py (validate)
-    - diagnose_overlaps.py (diagnose)
-    - generate_synthetic_datasets.sh (generate all)
-
-South African English spelling for user-facing text (e.g. "optimise").
 """
 
 import argparse
