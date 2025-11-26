@@ -141,7 +141,7 @@ dependencies = [
  "itertools",
  "itertools-num",
  "multimap",
- "ndarray 0.16.1",
+ "ndarray",
  "newtype_derive",
  "num-integer",
  "num-traits",
@@ -583,6 +583,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
 
 [[package]]
+name = "lapjv"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f66c977eaa63543f7d7bae335c66c46657ca973091340aff72ff141a50c0bfb3"
+dependencies = [
+ "log",
+ "ndarray",
+ "num-traits",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -687,21 +698,6 @@ name = "ndarray"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
-dependencies = [
- "matrixmultiply",
- "num-complex 0.4.6",
- "num-integer",
- "num-traits",
- "portable-atomic",
- "portable-atomic-util",
- "rawpointer",
-]
-
-[[package]]
-name = "ndarray"
-version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c7c9125e8f6f10c9da3aad044cc918cf8784fa34de857b1aa68038eb05a50a9"
 dependencies = [
  "matrixmultiply",
  "num-complex 0.4.6",
@@ -1168,7 +1164,9 @@ dependencies = [
  "clap",
  "env_logger",
  "flate2",
+ "lapjv",
  "log",
+ "ndarray",
  "pyo3",
  "rayon",
  "serde",
@@ -1253,7 +1251,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dca58a33be2188d4edc71534f8bafa826e787cc28ca1c47f31be3423f0d6e55"
 dependencies = [
  "alga",
- "ndarray 0.17.1",
+ "ndarray",
  "num-complex 0.4.6",
  "num-traits",
  "num_cpus",

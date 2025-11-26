@@ -284,8 +284,8 @@ fn run_pipeline(
     // Build affix array and overlap graph
     let affix = AffixArray::build(&reads, 3);
     debug!("[AFFIX] array built: {} entries", affix.len());
-    for (i, entry) in affix.iter().enumerate() {
-        let kind = match entry.kind() {
+    for (_, entry) in affix.iter().enumerate() {
+        let _kind = match entry.kind() {
             sequitur_rs::suffix::AffixKind::Suffix => "suffix",
             sequitur_rs::suffix::AffixKind::Prefix => "prefix",
         };
@@ -377,10 +377,6 @@ fn run_pipeline(
         adjacency_csc.nnz()
     );
 
-    debug!("[DEBUG] Overlap matrix:");
-    for (i, row) in overlap_matrix.outer_iterator().enumerate() {
-        debug!("[DEBUG] row {}: {:?}", i, row.data());
-    }
     let assembled = find_lower_diagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
     debug!("[DEBUG] Assembly path: {:?}", assembled);
 

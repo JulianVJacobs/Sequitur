@@ -103,8 +103,8 @@ pub fn create_overlap_graph(
             continue;
         }
 
-        let mut up_cut = false;
-        let mut down_cut = false;
+        // let up_cut = false;
+        // let down_cut = false;
         let read_len = read.len();
 
         // Track best edge per target for this source row to avoid duplicate triplets
