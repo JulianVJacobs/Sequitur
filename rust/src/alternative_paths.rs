@@ -1,6 +1,6 @@
-/// Given a square list and adjacency matrix, select swap configurations to maximise diagonal sum.
+/// Given a square list and adjacency matrix, select swap configurations to maximise first subdiagonal sum.
 /// Greedily applies swaps for non-overlapping squares; for overlapping, a global optimisation is needed.
-pub fn optimise_diagonal_sum(matrix: &mut CsMat<usize>, squares: &[SwapSquare]) {
+pub fn optimise_first_subdiagonal_sum(matrix: &mut CsMat<usize>, squares: &[SwapSquare]) {
     use crate::matching::swap_rows_and_cols;
     use std::collections::HashSet;
     let mut swapped: HashSet<(usize, usize)> = HashSet::new();
@@ -53,7 +53,7 @@ pub struct AlternativesAnalysis {
 ///
 /// For each pair of reads (i, j), check if the following predecessor overlaps are non-zero:
 ///     matrix[i, i-1], matrix[j, j-1], matrix[i, j-1], matrix[j, i-1]
-/// This forms a square region in the lower diagonal, indicating possible alternative paths.
+/// This forms a square region in the first subdiagonal, indicating possible alternative paths.
 ///
 /// Returns a list of SwapSquare where delta is the score change if swapped:
 ///     delta = (matrix[i, j-1] + matrix[j, i-1]) - (matrix[i, i-1] + matrix[j, j-1])
@@ -270,23 +270,22 @@ mod tests {
 
     #[test]
     fn detects_swap_square() {
-        // Create a matrix with a swap square at (0,1)
+        // Create a matrix with a swap square at (1,2) on the first subdiagonal
         let mut matrix = TriMat::new((4, 4));
-        matrix.add_triplet(0, 0, 10);
-        matrix.add_triplet(1, 1, 8);
-        matrix.add_triplet(0, 1, 7);
-        matrix.add_triplet(1, 0, 9);
-        matrix.add_triplet(2, 2, 5);
-        matrix.add_triplet(3, 3, 6);
+        // Predecessor overlaps for i=1, j=2
+        matrix.add_triplet(1, 0, 8); // (i, i-1)
+        matrix.add_triplet(2, 1, 7); // (j, j-1)
+        matrix.add_triplet(1, 1, 6); // (i, j-1)
+        matrix.add_triplet(2, 0, 9); // (j, i-1)
 
         let csr = matrix.to_csr();
         let squares = detect_swap_squares(&csr, None);
 
         assert_eq!(squares.len(), 1);
-        assert_eq!(squares[0].i, 0);
-        assert_eq!(squares[0].j, 1);
-        // delta = (7 + 9) - (10 + 8) = -2
-        assert!((squares[0].delta - (-2.0)).abs() < 0.001);
+        assert_eq!(squares[0].i, 1);
+        assert_eq!(squares[0].j, 2);
+        // delta = (6 + 9) - (8 + 7) = 15 - 15 = 0
+        assert!((squares[0].delta - 0.0).abs() < 0.001);
     }
 
     #[test]

@@ -12,7 +12,8 @@ use clap::Parser;
 use flate2::read::MultiGzDecoder;
 
 use sequitur_rs::{
-    analyse_alternatives, create_overlap_graph, find_lower_diagonal_path, AffixArray, OverlapConfig,
+    analyse_alternatives, create_overlap_graph, find_first_subdiagonal_path, AffixMap,
+    OverlapConfig,
 };
 
 /// Sequitur Rust CLI (prototype)
@@ -282,33 +283,37 @@ fn run_pipeline(
     reads.extend(reads1.iter().cloned());
     reads.extend(reads2.iter().cloned());
     // Build affix array and overlap graph
-    let affix = AffixArray::build(&reads, 3);
-    debug!("[AFFIX] array built: {} entries", affix.len());
-    for (_, entry) in affix.iter().enumerate() {
-        let _kind = match entry.kind() {
-            sequitur_rs::suffix::AffixKind::Suffix => "suffix",
-            sequitur_rs::suffix::AffixKind::Prefix => "prefix",
-        };
-    }
+    info!("Building affix map...");
+    let affix_map = AffixMap::build(&reads, 3);
+    info!(
+        "Affix map built with {} unique affixes.",
+        affix_map.keys.len()
+    );
 
     let config = OverlapConfig {
         ..OverlapConfig::default()
     };
-    let (_affix_array, mut adjacency_matrix, _overlap_matrix) =
-        create_overlap_graph(&reads, Some(affix), config);
+    info!("Creating overlap graph...");
+    let (_affix_map, mut adjacency_matrix, overlap_matrix) =
+        create_overlap_graph(&reads, Some(affix_map), config);
+    info!("Overlap graph created.");
 
-    // If requested, optimise swap squares for maximal diagonal sum
+    let reference = if let Some(path) = reference_path {
+        load_reference(Path::new(path))?
+    } else {
+        None
+    };
+
     if optimise_diagonal {
-        use sequitur_rs::alternative_paths::{detect_swap_squares, optimise_diagonal_sum};
+        use sequitur_rs::alternative_paths::{detect_swap_squares, optimise_first_subdiagonal_sum};
         let squares = detect_swap_squares(&adjacency_matrix, None);
-        optimise_diagonal_sum(&mut adjacency_matrix, &squares);
+        optimise_first_subdiagonal_sum(&mut adjacency_matrix, &squares);
         info!(
             "Applied maximal diagonal optimisation over {} swap squares.",
             squares.len()
         );
     }
 
-    // Export full assembly graph as JSON edge list with node attributes
     if let Some(graph_path) = export_graph_json {
         use serde_json::json;
         use std::io::Write;
@@ -333,42 +338,6 @@ fn run_pipeline(
         info!("Assembly graph written to {}", graph_path);
     }
 
-    if reads.is_empty() {
-        bail!(
-            "No reads were parsed from {} or {}",
-            reads1_path,
-            reads2_path
-        );
-    }
-
-    let reads2_label = if no_revcomp {
-        "from reads2"
-    } else {
-        "reverse-complemented from reads2"
-    };
-    info!(
-        "Loaded {} reads ({} from reads1, {} {})",
-        reads.len(),
-        reads1_count,
-        reads2_count,
-        reads2_label
-    );
-
-    let reference = if let Some(path) = reference_path {
-        load_reference(Path::new(path))?
-    } else {
-        None
-    };
-
-    let affix = AffixArray::build(&reads, 3);
-    info!("Built affix array with {} entries", affix.len());
-
-    let config = OverlapConfig {
-        ..OverlapConfig::default()
-    };
-    let (_affix_array, adjacency_matrix, overlap_matrix) =
-        create_overlap_graph(&reads, Some(affix), config);
-
     let adjacency_csc = adjacency_matrix.to_csc();
     let overlap_csc = overlap_matrix.to_csc();
 
@@ -377,7 +346,7 @@ fn run_pipeline(
         adjacency_csc.nnz()
     );
 
-    let assembled = find_lower_diagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
+    let assembled = find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
     debug!("[DEBUG] Assembly path: {:?}", assembled);
 
     // Analyse alternative paths if requested

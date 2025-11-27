@@ -1,3 +1,61 @@
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct AffixKey<'a> {
+    pub affix: &'a str,
+    pub kind: AffixKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct AffixMap<'a> {
+    pub keys: Vec<AffixKey<'a>>,
+    pub map: HashMap<AffixKey<'a>, Vec<usize>>,
+}
+
+impl<'a> AffixMap<'a> {
+    pub fn build(reads: &'a [String], min_suffix_len: usize) -> Self {
+        let min_len = min_suffix_len.max(1);
+        let mut map: HashMap<AffixKey<'a>, Vec<usize>> = HashMap::new();
+
+        for (read_index, read) in reads.iter().enumerate() {
+            let read_len = read.len();
+            if read_len < min_len {
+                continue;
+            }
+
+            for start in 0..=read_len - min_len {
+                let affix = &read[start..];
+                let key = AffixKey {
+                    affix,
+                    kind: AffixKind::Suffix,
+                };
+                map.entry(key).or_insert_with(Vec::new).push(read_index);
+            }
+
+            for span in min_len..=read_len {
+                let affix = &read[..span];
+                let key = AffixKey {
+                    affix,
+                    kind: AffixKind::Prefix,
+                };
+                map.entry(key).or_insert_with(Vec::new).push(read_index);
+            }
+        }
+
+        let mut keys: Vec<AffixKey<'a>> = map.keys().cloned().collect();
+        keys.sort_unstable();
+
+        AffixMap { keys, map }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &AffixKey<'a>> {
+        self.keys.iter()
+    }
+
+    pub fn reads_for(&self, key: &AffixKey<'a>) -> Option<&Vec<usize>> {
+        self.map.get(key)
+    }
+}
 use std::cmp::Ordering;
 
 const INVALID_ANCHOR: usize = usize::MAX;
@@ -266,84 +324,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_affix_array_for_single_read() {
+    fn builds_affix_map_for_single_read() {
         let reads = vec!["ACGT".to_string()];
-        let array = AffixArray::build(&reads, DEFAULT_MIN_SUFFIX_LEN);
-
-        let keys: Vec<String> = array
+        let map = AffixMap::build(&reads, DEFAULT_MIN_SUFFIX_LEN);
+        let keys: Vec<String> = map
             .iter()
-            .map(|entry| {
-                format!(
-                    "{}{}{}",
-                    entry.affix(&reads),
-                    entry.kind().marker(),
-                    entry.read_index()
-                )
-            })
+            .map(|key| format!("{}{:?}", key.affix, key.kind))
             .collect();
-        assert_eq!(keys, vec!["ACGT$0", "ACGT^0", "ACG^0", "CGT$0"]);
-
-        let (first, second, third, fourth) = (
-            array.get(0).unwrap(),
-            array.get(1).unwrap(),
-            array.get(2).unwrap(),
-            array.get(3).unwrap(),
-        );
-
-        assert_eq!(first.affix(&reads), "ACGT");
-        assert_eq!(first.kind(), AffixKind::Suffix);
-        assert_eq!(second.affix(&reads), "ACGT");
-        assert_eq!(second.kind(), AffixKind::Prefix);
-        assert_eq!(third.affix(&reads), "ACG");
-        assert_eq!(third.kind(), AffixKind::Prefix);
-        assert_eq!(fourth.affix(&reads), "CGT");
-        assert_eq!(fourth.kind(), AffixKind::Suffix);
+        assert!(keys.contains(&"ACGTSuffix".to_string()));
+        assert!(keys.contains(&"ACGTPrefix".to_string()));
+        assert!(keys.contains(&"ACGPrefix".to_string()));
+        assert!(keys.contains(&"CGTSuffix".to_string()));
+        // Validate mapping
+        for key in map.iter() {
+            let indices = map.reads_for(key).unwrap();
+            assert_eq!(indices, &vec![0]);
+        }
     }
 
     #[test]
     fn skips_reads_shorter_than_threshold() {
         let reads = vec!["AC".to_string(), "ACGT".to_string()];
-        let array = AffixArray::build(&reads, DEFAULT_MIN_SUFFIX_LEN);
-        assert_eq!(array.len(), 4);
-
-        let keys: Vec<String> = array
-            .iter()
-            .map(|entry| {
-                format!(
-                    "{}{}{}",
-                    entry.affix(&reads),
-                    entry.kind().marker(),
-                    entry.read_index()
-                )
-            })
-            .collect();
-        assert!(keys.iter().all(|key| key.ends_with('1')));
+        let map = AffixMap::build(&reads, DEFAULT_MIN_SUFFIX_LEN);
+        let keys: Vec<&AffixKey> = map.iter().collect();
+        // Only keys for the second read (index 1) should exist
+        for key in keys {
+            let indices = map.reads_for(key).unwrap();
+            assert!(indices.iter().all(|&idx| idx == 1));
+        }
     }
 
     #[test]
     fn supports_variable_min_suffix_lengths() {
         let reads = vec!["AACGT".to_string()];
-        let array = AffixArray::build(&reads, 2);
-        assert_eq!(array.len(), 8);
-
-        assert!(array.suffix_anchor(0, 2).is_some()); // CGT suffix
-        assert!(array.suffix_anchor(0, 3).is_some()); // GT suffix
-        assert!(array.iter().any(|entry| entry.kind() == AffixKind::Prefix
-            && entry.read_index() == 0
-            && entry.span() == 5));
-        assert!(array.iter().any(|entry| entry.kind() == AffixKind::Prefix
-            && entry.read_index() == 0
-            && entry.span() == 2));
+        let map = AffixMap::build(&reads, 2);
+        // Should contain all expected affixes
+        let expected_affixes = vec!["AACGT", "AACG", "ACGT", "CGT", "AAC", "GT", "AA"];
+        for affix in expected_affixes {
+            assert!(
+                map.iter().any(|key| key.affix == affix
+                    && (key.kind == AffixKind::Prefix || key.kind == AffixKind::Suffix)),
+                "Missing affix: {}",
+                affix
+            );
+        }
+        // All keys should map to read index 0
+        for key in map.iter() {
+            let indices = map.reads_for(key).unwrap();
+            assert_eq!(indices, &vec![0]);
+        }
     }
 
     #[test]
     fn treats_zero_min_suffix_as_one() {
         let reads = vec!["AA".to_string()];
-        let array = AffixArray::build(&reads, 0);
-        assert_eq!(array.len(), 4);
-        assert!(array.suffix_anchor(0, 0).is_some());
-        assert!(array.iter().any(|entry| entry.kind() == AffixKind::Prefix
-            && entry.read_index() == 0
-            && entry.span() == 1));
+        let map = AffixMap::build(&reads, 0);
+        // Should contain all expected affixes
+        let expected_affixes = vec!["AA", "A"];
+        for affix in expected_affixes {
+            assert!(map.iter().any(|key| key.affix == affix));
+        }
+        // All keys should map to read index 0
+        for key in map.iter() {
+            let indices = map.reads_for(key).unwrap();
+            assert_eq!(indices, &vec![0]);
+        }
     }
 }

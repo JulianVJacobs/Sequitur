@@ -100,8 +100,8 @@ pub fn relabel_rows(matrix: &mut TriMat<usize>, rows_map: &HashMap<usize, usize>
     *matrix = updated;
 }
 
-/// Placeholder for the lower diagonal traversal; not yet ported from Python.
-pub fn find_lower_diagonal_path(
+/// Placeholder for the subdiagonal traversal; not yet ported from Python.
+pub fn find_first_subdiagonal_path(
     matrix: &CsMat<usize>,
     overlap_csc: &CsMat<usize>,
     reads: &[String],
@@ -307,7 +307,7 @@ pub fn find_lower_diagonal_path(
         return String::new();
     }
 
-    // Print the final sorted overlap matrix in path order (reordered for lower diagonal)
+    // Print the final sorted overlap matrix in path order (reordered for first subdiagonal)
     debug!("[DEBUG] Final sorted overlap matrix (path order, reordered):");
     let mut reordered_matrix = Vec::with_capacity(path.len());
     for &row_idx in &path {
@@ -520,7 +520,7 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(2));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let assembled = find_lower_diagonal_path(&matrix, &overlap_csc, &reads, None);
+        let assembled = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
         assert_eq!(assembled, "ACGTAA");
     }
 
@@ -536,7 +536,7 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(2));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let assembled = find_lower_diagonal_path(&matrix, &overlap_csc, &reads, Some(&qualities));
+        let assembled = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, Some(&qualities));
         assert_eq!(assembled, "ACGTAA");
     }
 
@@ -565,7 +565,7 @@ mod tests {
         let overlap_csc = overlaps_to_csc(&overlaps);
 
         // With swap-square guard, both orders should be acceptable
-        let assembled = find_lower_diagonal_path(&matrix, &overlap_csc, &reads, None);
+        let assembled = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
         // Result should be valid (either A→B→C or A→C→B path)
         assert!(assembled.starts_with("AAAA"));
         assert!(assembled.len() >= 12); // At least 3 reads worth
@@ -596,7 +596,7 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(4));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let assembled = find_lower_diagonal_path(&matrix, &overlap_csc, &reads, None);
+        let assembled = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
         // Should follow valid forward path: A→B→D, then append C
         assert!(assembled.len() > 0);
     }
@@ -625,7 +625,7 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(4));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let assembled = find_lower_diagonal_path(&matrix, &overlap_csc, &reads, None);
+        let assembled = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
         // With overlaps, total length will be: 8 + (8-3) + (8-3) + (8-3) = 8+5+5+5 = 23
         // But actual behavior depends on path order
         assert!(assembled.len() >= 8); // At least one read
@@ -652,7 +652,7 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(3));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let assembled = find_lower_diagonal_path(&matrix, &overlap_csc, &reads, None);
+        let assembled = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
         // With overlap=3: 8 + (8-3) + (8-3) = 8+5+5 = 18
         // But overlap includes overlapping bases, so: "AAAABBBB" + "BCCCC" + "CDDDD" = "AAAABBBBBCCCCCDDDD" (19 chars)
         assert_eq!(assembled.len(), 18); // Correct accounting for overlaps

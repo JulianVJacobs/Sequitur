@@ -1,12 +1,12 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::affix::AffixMap;
 use crate::alternative_paths::analyse_alternatives;
 use crate::matching::detect_cycles;
-use crate::matching::find_lower_diagonal_path;
+use crate::matching::find_first_subdiagonal_path;
 use crate::overlap::compute_edge_confidences;
 use crate::overlap::{create_overlap_graph, Adjacency, OverlapConfig};
-use crate::suffix::AffixArray;
 use pyo3::types::{PyDict, PyList};
 use sprs::CsMat;
 use std::collections::HashMap;
@@ -46,20 +46,20 @@ fn assemble_from_reads(reads: Vec<String>) -> PyResult<AssemblyResult> {
         return Err(PyValueError::new_err("reads list is empty"));
     }
 
-    // Build affix array
-    let affix = AffixArray::build(&reads, 3);
+    // Build affix map
+    let affix_map = AffixMap::build(&reads, 3);
 
     // Create overlap graph with default config
     let config = OverlapConfig::default();
     let (_affix_out, adjacency_matrix, overlap_matrix) =
-        create_overlap_graph(&reads, Some(affix), config);
+        create_overlap_graph(&reads, Some(affix_map), config);
 
     // Convert to CSC
     let adjacency_csc = adjacency_matrix.to_csc();
     let overlap_csc = overlap_matrix.to_csc();
 
     // Call assembler (qualities not provided)
-    let seq = find_lower_diagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
+    let seq = find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
 
     Ok(AssemblyResult::new(seq))
 }
@@ -69,10 +69,10 @@ fn analyse_reads(py: Python, reads: Vec<String>) -> PyResult<PyObject> {
     if reads.is_empty() {
         return Err(PyValueError::new_err("reads list is empty"));
     }
-    let affix = AffixArray::build(&reads, 3);
+    let affix_map = AffixMap::build(&reads, 3);
     let config = OverlapConfig::default();
     let (_affix_out, adjacency_matrix, overlap_matrix) =
-        create_overlap_graph(&reads, Some(affix), config);
+        create_overlap_graph(&reads, Some(affix_map), config);
 
     let adjacency = sparse_to_adjacency_local(&adjacency_matrix);
     let overlap_lengths = sparse_to_adjacency_local(&overlap_matrix);
@@ -130,10 +130,10 @@ fn analyse_alternative_paths(
     }
 
     // Build overlap graph
-    let affix = AffixArray::build(&reads, 3);
+    let affix_map = AffixMap::build(&reads, 3);
     let config = OverlapConfig::default();
     let (_affix_out, adjacency_matrix, _overlap_matrix) =
-        create_overlap_graph(&reads, Some(affix), config);
+        create_overlap_graph(&reads, Some(affix_map), config);
 
     // Convert to CSC
     let adjacency_csc = adjacency_matrix.to_csc();

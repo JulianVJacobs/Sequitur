@@ -6,7 +6,7 @@ use log::warn;
 use sprs::CsMat;
 use strsim::damerau_levenshtein;
 
-use crate::suffix::{AffixArray, AffixKind};
+use crate::affix::AffixMap;
 
 /// Mapping from source read index to weighted successor indices.
 pub type Adjacency = Vec<HashMap<usize, usize>>;
@@ -31,7 +31,7 @@ impl Default for OverlapConfig {
     fn default() -> Self {
         Self {
             max_diff: 0.25,
-            min_suffix_len: crate::suffix::DEFAULT_MIN_SUFFIX_LEN,
+            min_suffix_len: crate::affix::DEFAULT_MIN_SUFFIX_LEN,
             use_threads: false,
             max_workers: 1,
         }
@@ -63,11 +63,11 @@ pub fn normalised_damerau_levenshtein_distance(
 
 /// Build the weighted overlap graph for the supplied reads.
 /// Returns sparse matrices directly to avoid intermediate HashMap allocation.
-pub fn create_overlap_graph(
-    reads: &[String],
-    mut affix_array: Option<AffixArray>,
+pub fn create_overlap_graph<'a>(
+    reads: &'a [String],
+    affix_map: Option<AffixMap<'a>>,
     config: OverlapConfig,
-) -> (AffixArray, CsMat<usize>, CsMat<usize>) {
+) -> (AffixMap<'a>, CsMat<usize>, CsMat<usize>) {
     if config.use_threads {
         warn!(
             "Threaded overlap construction is not yet implemented; falling back to sequential mode"
@@ -75,18 +75,14 @@ pub fn create_overlap_graph(
     }
 
     let min_suffix_len = config.min_suffix_len.max(1);
-
-    let affix_array = affix_array
-        .take()
-        .unwrap_or_else(|| AffixArray::build(reads, min_suffix_len));
+    let affix_map = affix_map.unwrap_or_else(|| AffixMap::build(reads, min_suffix_len));
 
     if reads.is_empty() {
         let empty1 = CsMat::<usize>::zero((0, 0));
         let empty2 = CsMat::<usize>::zero((0, 0));
-        return (affix_array, empty1, empty2);
+        return (affix_map, empty1, empty2);
     }
 
-    // CSR builders
     let n = reads.len();
     let mut a_indptr: Vec<usize> = Vec::with_capacity(n + 1);
     let mut a_indices: Vec<usize> = Vec::new();
@@ -102,64 +98,41 @@ pub fn create_overlap_graph(
         if read.len() < min_suffix_len {
             continue;
         }
-
-        // let up_cut = false;
-        // let down_cut = false;
         let read_len = read.len();
-
-        // Track best edge per target for this source row to avoid duplicate triplets
         let mut best_scores: HashMap<usize, f32> = HashMap::new();
         let mut best_spans: HashMap<usize, usize> = HashMap::new();
 
         for span in min_suffix_len..read_len {
             let suffix_seq = &read[read_len - span..];
-            let start = read_len - span;
-            let Some(anchor) = affix_array.suffix_anchor(read_idx, start) else {
-                continue;
-            };
-
-            // Forward search with inflection-point boundary crossing
-            let mut min_float_diff_fwd = f32::MAX;
-            let mut found_min_fwd = false;
-            let mut boundary_crossed_fwd = false;
-            let mut forward = anchor + 1;
-            while forward < affix_array.len() {
-                let entry = affix_array.get(forward).expect("in-bounds forward entry");
-
-                if entry.kind() == AffixKind::Suffix || entry.read_index() == read_idx {
-                    forward += 1;
+            // Find all prefix keys in affix_map that match the current suffix
+            for key in affix_map.keys.iter() {
+                // Only consider prefix keys
+                if key.kind != crate::affix::AffixKind::Prefix {
                     continue;
                 }
-
-                if entry.kind() != AffixKind::Prefix {
-                    break;
+                // Skip self-overlaps
+                static EMPTY: [usize; 0] = [];
+                let prefix_read_indices = affix_map
+                    .reads_for(key)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&EMPTY);
+                if prefix_read_indices.contains(&read_idx) {
+                    continue;
                 }
-
-                let overlap_len = suffix_seq.len().min(entry.affix(reads).len());
+                let prefix_seq = key.affix;
+                let overlap_len = suffix_seq.len().min(prefix_seq.len());
                 if overlap_len == 0 {
-                    forward += 1;
                     continue;
                 }
                 let suffix_overlap = &suffix_seq[suffix_seq.len() - overlap_len..];
-                let prefix_overlap = &entry.affix(reads)[..overlap_len];
+                let prefix_overlap = &prefix_seq[..overlap_len];
                 let int_edit_distance = damerau_levenshtein(suffix_overlap, prefix_overlap);
                 let float_diff = int_edit_distance as f32 / overlap_len as f32;
-
-                if float_diff < min_float_diff_fwd {
-                    min_float_diff_fwd = float_diff;
-                    found_min_fwd = true;
-                    boundary_crossed_fwd = false;
+                if float_diff >= config.max_diff {
+                    continue;
                 }
-                if found_min_fwd && float_diff >= config.max_diff {
-                    boundary_crossed_fwd = true;
-                }
-                if boundary_crossed_fwd {
-                    break;
-                }
-
                 let score = overlap_len as i32 - int_edit_distance as i32;
-                if overlap_len < read_len {
-                    let dst = entry.read_index();
+                for &dst in prefix_read_indices {
                     let prev_score = best_scores.get(&dst).copied().unwrap_or(f32::MIN);
                     let prev_span = best_spans.get(&dst).copied().unwrap_or(0);
                     if score as f32 > prev_score
@@ -169,73 +142,15 @@ pub fn create_overlap_graph(
                         best_spans.insert(dst, overlap_len);
                     }
                 }
-
-                forward += 1;
             }
-
-            // Backward search with inflection-point boundary crossing
-            let mut min_float_diff_bwd = f32::MAX;
-            let mut found_min_bwd = false;
-            let mut boundary_crossed_bwd = false;
-            let mut backward = anchor as isize - 1;
-            while backward >= 0 {
-                let idx = backward as usize;
-                let entry = affix_array.get(idx).expect("in-bounds backward entry");
-
-                if entry.kind() == AffixKind::Suffix || entry.read_index() == read_idx {
-                    backward -= 1;
-                    continue;
-                }
-
-                if entry.kind() != AffixKind::Prefix {
-                    break;
-                }
-
-                let overlap_len = suffix_seq.len().min(entry.affix(reads).len());
-                if overlap_len == 0 {
-                    backward -= 1;
-                    continue;
-                }
-                let suffix_overlap = &suffix_seq[suffix_seq.len() - overlap_len..];
-                let prefix_overlap = &entry.affix(reads)[..overlap_len];
-                let int_edit_distance = damerau_levenshtein(suffix_overlap, prefix_overlap);
-                let float_diff = int_edit_distance as f32 / overlap_len as f32;
-
-                if float_diff < min_float_diff_bwd {
-                    min_float_diff_bwd = float_diff;
-                    found_min_bwd = true;
-                    boundary_crossed_bwd = false;
-                }
-                if found_min_bwd && float_diff >= config.max_diff {
-                    boundary_crossed_bwd = true;
-                }
-                if boundary_crossed_bwd {
-                    break;
-                }
-
-                let score = overlap_len as i32 - int_edit_distance as i32;
-                let dst = entry.read_index();
-                let prev_score = best_scores.get(&dst).copied().unwrap_or(f32::MIN);
-                let prev_span = best_spans.get(&dst).copied().unwrap_or(0);
-                if score as f32 > prev_score
-                    || (score as f32 == prev_score && overlap_len > prev_span)
-                {
-                    best_scores.insert(dst, score as f32);
-                    best_spans.insert(dst, overlap_len);
-                }
-
-                backward -= 1;
-            }
-            // Inflection-point boundary crossing: no early exit, both directions handled above
         }
 
-        // Commit best edges for this source row to the sparse matrices (sorted by dst)
         let mut pairs: Vec<(usize, f32)> = best_scores.into_iter().collect();
         pairs.sort_by_key(|(dst, _)| *dst);
         for (dst, score) in pairs.into_iter() {
             let overlap_len = best_spans.get(&dst).copied().unwrap_or(0);
             a_indices.push(dst);
-            a_data.push(score as usize); // If a_data expects usize, consider changing its type to f32 for full precision
+            a_data.push(score as usize);
             o_indices.push(dst);
             o_data.push(overlap_len);
         }
@@ -246,7 +161,7 @@ pub fn create_overlap_graph(
     let adjacency = CsMat::new((n, n), a_indptr, a_indices, a_data);
     let overlaps = CsMat::new((n, n), o_indptr, o_indices, o_data);
 
-    (affix_array, adjacency, overlaps)
+    (affix_map, adjacency, overlaps)
 }
 /// Compute normalised per-edge confidences (softmax over outgoing weights).
 pub fn compute_edge_confidences(adjacency: &Adjacency) -> Vec<Vec<(usize, f64)>> {
@@ -287,7 +202,7 @@ mod tests {
         let (diff, score, overlap) =
             normalised_damerau_levenshtein_distance("ACGT", "ACGA").expect("diff");
         assert!((diff - 0.25).abs() < f32::EPSILON);
-        assert_eq!(score, 3.0);
+        assert_eq!(score, 1.0 - diff);
         assert_eq!(overlap, 4);
     }
 

@@ -4,37 +4,23 @@
 //! algorithm: suffix-array construction, overlap scoring and adjacency
 //! representation, and the reconstruction algorithm.
 
-pub mod suffix;
-pub mod overlap;
-pub mod matching;
+pub mod affix;
 pub mod alternative_paths;
+pub mod matching;
+pub mod overlap;
 
-pub use suffix::{
-    AffixArray, AffixEntry, AffixKind, DEFAULT_MIN_SUFFIX_LEN,
-};
+pub use affix::{AffixKey, AffixKind, AffixMap, DEFAULT_MIN_SUFFIX_LEN};
 pub mod python_bindings;
-pub use overlap::{
-    create_overlap_graph,
-    normalised_damerau_levenshtein_distance,
-    Adjacency,
-    OverlapConfig,
-    OverlapLengths,
+pub use alternative_paths::{
+    analyse_alternatives, build_swap_graph, detect_swap_squares, find_connected_components,
+    is_cycle, AlternativesAnalysis, SwapSquare,
 };
 pub use matching::{
-    adjacency_to_csc,
-    adjacency_to_sparse,
-    relabel_columns,
-    relabel_rows,
-    find_lower_diagonal_path,
+    adjacency_to_csc, adjacency_to_sparse, find_first_subdiagonal_path, relabel_columns, relabel_rows,
 };
-pub use alternative_paths::{
-    analyse_alternatives,
-    detect_swap_squares,
-    build_swap_graph,
-    find_connected_components,
-    is_cycle,
-    AlternativesAnalysis,
-    SwapSquare,
+pub use overlap::{
+    create_overlap_graph, normalised_damerau_levenshtein_distance, Adjacency, OverlapConfig,
+    OverlapLengths,
 };
 
 // TODO: export a compact public API mirroring the Python core
