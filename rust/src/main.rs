@@ -20,6 +20,13 @@ use sequitur_rs::{
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Enable threaded overlap graph construction (default: off)
+    #[arg(long, default_value_t = false)]
+    threads: bool,
+
+    /// Number of worker threads for overlap graph construction (default: 1)
+    #[arg(long, default_value_t = 1)]
+    max_workers: usize,
     /// FASTQ/FASTA file for read set 1
     reads1: String,
 
@@ -114,6 +121,8 @@ fn main() {
         args.no_revcomp,
         args.export_graph_json.as_deref(),
         args.optimise_diagonal,
+        args.threads,
+        args.max_workers,
     ) {
         eprintln!("Assembly failed: {error:?}");
         std::process::exit(1);
@@ -263,6 +272,8 @@ fn run_pipeline(
     no_revcomp: bool,
     export_graph_json: Option<&str>,
     optimise_diagonal: bool,
+    use_threads: bool,
+    max_workers: usize,
 ) -> Result<String> {
     let reads1 = read_sequences(Path::new(reads1_path))
         .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
@@ -291,6 +302,8 @@ fn run_pipeline(
     );
 
     let config = OverlapConfig {
+        use_threads,
+        max_workers,
         ..OverlapConfig::default()
     };
     info!("Creating overlap graph...");
@@ -497,6 +510,8 @@ mod smoke {
             false,
             None,
             false,
+            false, // use_threads
+            1,     // max_workers
         );
         assert!(res.is_ok());
     }

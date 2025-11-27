@@ -41,7 +41,11 @@ impl AssemblyResult {
 }
 
 #[pyfunction]
-fn assemble_from_reads(reads: Vec<String>) -> PyResult<AssemblyResult> {
+fn assemble_from_reads(
+    reads: Vec<String>,
+    use_threads: Option<bool>,
+    max_workers: Option<usize>,
+) -> PyResult<AssemblyResult> {
     if reads.is_empty() {
         return Err(PyValueError::new_err("reads list is empty"));
     }
@@ -49,8 +53,12 @@ fn assemble_from_reads(reads: Vec<String>) -> PyResult<AssemblyResult> {
     // Build affix map
     let affix_map = AffixMap::build(&reads, 3);
 
-    // Create overlap graph with default config
-    let config = OverlapConfig::default();
+    // Create overlap graph with threading config
+    let config = OverlapConfig {
+        use_threads: use_threads.unwrap_or(false),
+        max_workers: max_workers.unwrap_or(1),
+        ..OverlapConfig::default()
+    };
     let (_affix_out, adjacency_matrix, overlap_matrix) =
         create_overlap_graph(&reads, Some(affix_map), config);
 
@@ -65,12 +73,21 @@ fn assemble_from_reads(reads: Vec<String>) -> PyResult<AssemblyResult> {
 }
 
 #[pyfunction]
-fn analyse_reads(py: Python, reads: Vec<String>) -> PyResult<PyObject> {
+fn analyse_reads(
+    py: Python,
+    reads: Vec<String>,
+    use_threads: Option<bool>,
+    max_workers: Option<usize>,
+) -> PyResult<PyObject> {
     if reads.is_empty() {
         return Err(PyValueError::new_err("reads list is empty"));
     }
     let affix_map = AffixMap::build(&reads, 3);
-    let config = OverlapConfig::default();
+    let config = OverlapConfig {
+        use_threads: use_threads.unwrap_or(false),
+        max_workers: max_workers.unwrap_or(1),
+        ..OverlapConfig::default()
+    };
     let (_affix_out, adjacency_matrix, overlap_matrix) =
         create_overlap_graph(&reads, Some(affix_map), config);
 
@@ -124,6 +141,8 @@ fn analyse_alternative_paths(
     py: Python,
     reads: Vec<String>,
     score_gap: Option<f64>,
+    use_threads: Option<bool>,
+    max_workers: Option<usize>,
 ) -> PyResult<PyObject> {
     if reads.is_empty() {
         return Err(PyValueError::new_err("reads list is empty"));
@@ -131,7 +150,11 @@ fn analyse_alternative_paths(
 
     // Build overlap graph
     let affix_map = AffixMap::build(&reads, 3);
-    let config = OverlapConfig::default();
+    let config = OverlapConfig {
+        use_threads: use_threads.unwrap_or(false),
+        max_workers: max_workers.unwrap_or(1),
+        ..OverlapConfig::default()
+    };
     let (_affix_out, adjacency_matrix, _overlap_matrix) =
         create_overlap_graph(&reads, Some(affix_map), config);
 

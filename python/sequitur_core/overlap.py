@@ -1,4 +1,12 @@
-"""Overlap detection utilities for the Sequitur assembler."""
+"""
+Overlap detection utilities for the Sequitur assembler (DEPRECATED).
+
+WARNING: This pure Python implementation is deprecated and much slower than the Rust version.
+For production, use the Rust library via PyO3 bindings (`sequitur_rs`).
+
+Threading logic here is legacy and not recommended for new code.
+See docs/RUST_ARCHITECTURE.md for migration guide and usage.
+"""
 
 from __future__ import annotations
 
@@ -78,6 +86,7 @@ def create_bipartite_adjacency_matrix(
     min_suffix_len: int = 3,
     use_threads: bool = False,
     max_workers: int = 16,
+    # DEPRECATED: Threading in Python is legacy. Use Rust for performance.
 ) -> Tuple[Adjacency, OverlapLengths]:
     """Build the weighted successor/predecessor mapping for Sequitur.
 
@@ -204,7 +213,12 @@ def create_bipartite_adjacency_matrix(
             if _up_cut and _down_cut:
                 break
 
+    import warnings
     if use_threads:
+        warnings.warn(
+            "Python threading is deprecated. Use Rust implementation for performance.",
+            DeprecationWarning,
+        )
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             list(executor.map(process_suffix, range(len(reads_list))))
     else:

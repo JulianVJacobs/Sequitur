@@ -87,25 +87,33 @@ export PYTHONPATH="$(pwd)/target/release:$PYTHONPATH"
 
 ## API Reference
 
-### Python Bindings
+### Python Bindings & Threading
 
-All Rust functions are exposed through `sequitur_rs`:
+All Rust functions are exposed through `sequitur_rs` and now support threading configuration:
 
 ```python
 import sequitur_rs
 
-# Assembly
-result = sequitur_rs.assemble_from_reads(reads: list[str]) -> AssemblyResult
+# Assembly (threading enabled)
+result = sequitur_rs.assemble_from_reads(reads, use_threads=True, max_workers=8)
 
-# Read analysis (includes cycle detection)
-analysis = sequitur_rs.analyse_reads(reads: list[str]) -> dict
+# Read analysis (threading enabled)
+analysis = sequitur_rs.analyse_reads(reads, use_threads=True, max_workers=8)
 
-# Alternative path detection
+# Alternative path detection (threading enabled)
 alternatives = sequitur_rs.analyse_alternative_paths(
-    reads: list[str],
-    score_gap: float | None
-) -> dict
+    reads,
+    score_gap=5.0,
+    use_threads=True,
+    max_workers=8
+)
 ```
+
+**Threading Options:**
+- `use_threads`: Enable parallel overlap graph construction (default: False)
+- `max_workers`: Number of worker threads (default: 1)
+
+Threading is available in both CLI and Python APIs. For deterministic debugging, set `use_threads=False`.
 
 Returns:
 ```python
@@ -144,16 +152,21 @@ result = sequitur_rs.analyse_alternative_paths(reads, score_gap=5.0)
 assembly = sequitur_rs.assemble_from_reads(reads)
 ```
 
-### Python CLI Compatibility
+### Python CLI Compatibility & Threading
 
-The Python CLI (`python/sequitur.py`) automatically uses Rust bindings when available:
+The Python CLI (`python/sequitur.py`) and Rust CLI support threading options:
 
 ```bash
-# Automatically uses Rust if sequitur_rs is installed
-python sequitur.py reads1.fastq reads2.fastq \
-    --analyse-alternatives \
-    --output-fasta assembled.fasta
+# Rust CLI
+cargo run -- reads1.fastq reads2.fastq --threads --max-workers 8 --output-fasta assembled.fasta
+
+# Python CLI (uses Rust if available)
+python sequitur.py reads1.fastq reads2.fastq --threads --max-workers 8 --analyse-alternatives --output-fasta assembled.fasta
 ```
+
+Threading options:
+- `--threads`: Enable parallel overlap graph construction
+- `--max-workers N`: Number of worker threads
 
 ## Development Workflow
 

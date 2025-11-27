@@ -94,9 +94,12 @@ pub fn create_overlap_graph<'a>(
     a_indptr.push(0);
     o_indptr.push(0);
 
-    for (read_idx, read) in reads.iter().enumerate() {
+    #[cfg(feature = "parallel")]
+    use rayon::prelude::*;
+
+    let process_read = |(read_idx, read): (usize, &String)| {
         if read.len() < min_suffix_len {
-            continue;
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         }
         let read_len = read.len();
         let mut best_scores: HashMap<usize, f32> = HashMap::new();
@@ -104,13 +107,10 @@ pub fn create_overlap_graph<'a>(
 
         for span in min_suffix_len..read_len {
             let suffix_seq = &read[read_len - span..];
-            // Find all prefix keys in affix_map that match the current suffix
             for key in affix_map.keys.iter() {
-                // Only consider prefix keys
                 if key.kind != crate::affix::AffixKind::Prefix {
                     continue;
                 }
-                // Skip self-overlaps
                 static EMPTY: [usize; 0] = [];
                 let prefix_read_indices = affix_map
                     .reads_for(key)
@@ -145,14 +145,52 @@ pub fn create_overlap_graph<'a>(
             }
         }
 
+        let mut a_idx = Vec::new();
+        let mut a_dat = Vec::new();
+        let mut o_idx = Vec::new();
+        let mut o_dat = Vec::new();
         let mut pairs: Vec<(usize, f32)> = best_scores.into_iter().collect();
         pairs.sort_by_key(|(dst, _)| *dst);
         for (dst, score) in pairs.into_iter() {
             let overlap_len = best_spans.get(&dst).copied().unwrap_or(0);
-            a_indices.push(dst);
-            a_data.push(score as usize);
-            o_indices.push(dst);
-            o_data.push(overlap_len);
+            a_idx.push(dst);
+            a_dat.push(score as usize);
+            o_idx.push(dst);
+            o_dat.push(overlap_len);
+        }
+        (a_idx, a_dat, o_idx, o_dat)
+    };
+
+    let results: Vec<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = if config.use_threads {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::ThreadPoolBuilder;
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(config.max_workers)
+                .build()
+                .expect("Failed to build rayon thread pool");
+            pool.install(|| reads.par_iter().enumerate().map(process_read).collect())
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            reads.iter().enumerate().map(process_read).collect()
+        }
+    } else {
+        reads.iter().enumerate().map(process_read).collect()
+    };
+
+    for (a_idx, a_dat, o_idx, o_dat) in results {
+        for idx in a_idx {
+            a_indices.push(idx);
+        }
+        for dat in a_dat {
+            a_data.push(dat);
+        }
+        for idx in o_idx {
+            o_indices.push(idx);
+        }
+        for dat in o_dat {
+            o_data.push(dat);
         }
         a_indptr.push(a_indices.len());
         o_indptr.push(o_indices.len());

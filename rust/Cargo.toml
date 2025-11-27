@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 clap = { version = "4.1", features = ["derive"] }
-rayon = "1.7"
+rayon = { version = "1.7", optional = true }
 bio = "3"
 strsim = "0.11"
 sprs = "0.11.4"
@@ -29,4 +29,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies.pyo3]
 version = "0.18"
 features = ["extension-module", "auto-initialize"]
+
+[features]
+parallel = ["rayon"]
 
