@@ -68,9 +68,10 @@ pub fn create_overlap_graph<'a>(
     affix_map: Option<AffixMap<'a>>,
     config: OverlapConfig,
 ) -> (AffixMap<'a>, CsMat<usize>, CsMat<usize>) {
+    #[cfg(not(feature = "parallel"))]
     if config.use_threads {
         warn!(
-            "Threaded overlap construction is not yet implemented; falling back to sequential mode"
+            "Threaded overlap construction requested, but the 'parallel' feature is not enabled; falling back to sequential mode"
         );
     }
 
