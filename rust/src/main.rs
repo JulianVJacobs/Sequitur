@@ -24,9 +24,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     threads: bool,
 
-    /// Number of worker threads for overlap graph construction (default: 1)
-    #[arg(long, default_value_t = 1)]
+    /// Number of worker threads for overlap graph construction (default: max available)
+    #[arg(long, default_value_t = num_cpus::get())]
     max_workers: usize,
+    
     /// FASTQ/FASTA file for read set 1
     reads1: String,
 

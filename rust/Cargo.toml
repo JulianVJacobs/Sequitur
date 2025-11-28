@@ -21,6 +21,7 @@ tempfile = "3"
 flate2 = "1"
 lapjv = "0.3.0"
 ndarray = "0.16"
+num_cpus = "1.13"
 
 [lib]
 name = "sequitur_rs"

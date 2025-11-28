@@ -1167,6 +1167,7 @@ dependencies = [
  "lapjv",
  "log",
  "ndarray",
+ "num_cpus",
  "pyo3",
  "rayon",
  "serde",
