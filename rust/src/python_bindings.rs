@@ -45,6 +45,7 @@ fn assemble_from_reads(
     reads: Vec<String>,
     use_threads: Option<bool>,
     max_workers: Option<usize>,
+    use_trie: Option<bool>,
 ) -> PyResult<AssemblyResult> {
     if reads.is_empty() {
         return Err(PyValueError::new_err("reads list is empty"));
@@ -57,6 +58,7 @@ fn assemble_from_reads(
     let config = OverlapConfig {
         use_threads: use_threads.unwrap_or(false),
         max_workers: max_workers.unwrap_or(1),
+        use_trie: use_trie.unwrap_or(true),
         ..OverlapConfig::default()
     };
     let (_affix_out, adjacency_matrix, overlap_matrix) =
@@ -78,6 +80,7 @@ fn analyse_reads(
     reads: Vec<String>,
     use_threads: Option<bool>,
     max_workers: Option<usize>,
+    use_trie: Option<bool>,
 ) -> PyResult<PyObject> {
     if reads.is_empty() {
         return Err(PyValueError::new_err("reads list is empty"));
@@ -86,6 +89,7 @@ fn analyse_reads(
     let config = OverlapConfig {
         use_threads: use_threads.unwrap_or(false),
         max_workers: max_workers.unwrap_or(1),
+        use_trie: use_trie.unwrap_or(true),
         ..OverlapConfig::default()
     };
     let (_affix_out, adjacency_matrix, overlap_matrix) =
@@ -143,6 +147,7 @@ fn analyse_alternative_paths(
     score_gap: Option<f64>,
     use_threads: Option<bool>,
     max_workers: Option<usize>,
+    use_trie: Option<bool>,
 ) -> PyResult<PyObject> {
     if reads.is_empty() {
         return Err(PyValueError::new_err("reads list is empty"));
@@ -153,6 +158,7 @@ fn analyse_alternative_paths(
     let config = OverlapConfig {
         use_threads: use_threads.unwrap_or(false),
         max_workers: max_workers.unwrap_or(1),
+        use_trie: use_trie.unwrap_or(true),
         ..OverlapConfig::default()
     };
     let (_affix_out, adjacency_matrix, _overlap_matrix) =

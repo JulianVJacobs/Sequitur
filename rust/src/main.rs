@@ -27,7 +27,7 @@ struct Args {
     /// Number of worker threads for overlap graph construction (default: max available)
     #[arg(long, default_value_t = num_cpus::get())]
     max_workers: usize,
-    
+
     /// FASTQ/FASTA file for read set 1
     reads1: String,
 
@@ -84,6 +84,10 @@ struct Args {
     /// Optimise swap squares for maximal diagonal sum (deterministic)
     #[arg(long)]
     optimise_diagonal: bool,
+
+    /// Use the original array-based affix structure instead of the trie (trie is default)
+    #[arg(long)]
+    use_array: bool,
 }
 
 fn main() {
@@ -124,6 +128,7 @@ fn main() {
         args.optimise_diagonal,
         args.threads,
         args.max_workers,
+        args.use_array,
     ) {
         eprintln!("Assembly failed: {error:?}");
         std::process::exit(1);
@@ -275,6 +280,7 @@ fn run_pipeline(
     optimise_diagonal: bool,
     use_threads: bool,
     max_workers: usize,
+    use_array: bool,
 ) -> Result<String> {
     let reads1 = read_sequences(Path::new(reads1_path))
         .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
@@ -305,6 +311,7 @@ fn run_pipeline(
     let config = OverlapConfig {
         use_threads,
         max_workers,
+        use_trie: !use_array,
         ..OverlapConfig::default()
     };
     info!("Creating overlap graph...");
@@ -513,6 +520,7 @@ mod smoke {
             false,
             false, // use_threads
             1,     // max_workers
+            false, // use_array
         );
         assert!(res.is_ok());
     }

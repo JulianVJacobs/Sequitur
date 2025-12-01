@@ -9,14 +9,18 @@ pub mod alternative_paths;
 pub mod matching;
 pub mod overlap;
 
-pub use affix::{AffixKey, AffixKind, AffixMap, DEFAULT_MIN_SUFFIX_LEN};
+pub use affix::{
+    AffixKey, AffixKind, AffixMap, AffixNode, AffixSlice, AffixStructure, Direction,
+    PrunedAffixTrie, DEFAULT_MIN_SUFFIX_LEN,
+};
 pub mod python_bindings;
 pub use alternative_paths::{
     analyse_alternatives, build_swap_graph, detect_swap_squares, find_connected_components,
     is_cycle, AlternativesAnalysis, SwapSquare,
 };
 pub use matching::{
-    adjacency_to_csc, adjacency_to_sparse, find_first_subdiagonal_path, relabel_columns, relabel_rows,
+    adjacency_to_csc, adjacency_to_sparse, find_first_subdiagonal_path, relabel_columns,
+    relabel_rows,
 };
 pub use overlap::{
     create_overlap_graph, normalised_damerau_levenshtein_distance, Adjacency, OverlapConfig,
