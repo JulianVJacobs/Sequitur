@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use log::warn;
 use sprs::CsMat;
 use strsim::damerau_levenshtein;
 
@@ -70,6 +69,7 @@ pub fn create_overlap_graph<'a>(
 ) -> (AffixMap<'a>, CsMat<usize>, CsMat<usize>) {
     #[cfg(not(feature = "parallel"))]
     if config.use_threads {
+        use log::warn;
         warn!(
             "Threaded overlap construction requested, but the 'parallel' feature is not enabled; falling back to sequential mode"
         );
