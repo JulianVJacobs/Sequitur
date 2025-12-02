@@ -24,8 +24,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     threads: bool,
 
-    /// Number of worker threads for overlap graph construction (default: max available)
-    #[arg(long, default_value_t = num_cpus::get())]
+    /// Number of worker threads for overlap graph construction (default: max available - 1)
+    #[arg(long, default_value_t = num_cpus::get() - 1)]
     max_workers: usize,
 
     /// FASTQ/FASTA file for read set 1
@@ -103,7 +103,9 @@ fn main() {
     } else {
         "error"
     };
-    std::env::set_var("RUST_LOG", log_level);
+    unsafe {
+        std::env::set_var("RUST_LOG", log_level);
+    }
     env_logger::init();
 
     info!("Sequitur Rust prototype");

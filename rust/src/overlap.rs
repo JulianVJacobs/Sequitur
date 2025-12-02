@@ -7,6 +7,9 @@ use strsim::damerau_levenshtein;
 
 use crate::affix::{AffixKind, AffixMap, AffixStructure};
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// Mapping from source read index to weighted successor indices.
 pub type Adjacency = Vec<HashMap<usize, usize>>;
 
@@ -108,27 +111,71 @@ fn create_overlap_graph_from_trie(
     let candidates = affix_trie.overlap_candidates(reads);
 
     // Build best scores and spans for each read pair
-    let mut best_scores: HashMap<(usize, usize), f32> = HashMap::new();
-    let mut best_spans: HashMap<(usize, usize), usize> = HashMap::new();
+    #[cfg(feature = "parallel")]
+    let (best_scores, best_spans) = {
+        // Parallel verification with thread-local HashMaps
+        let local_results: Vec<HashMap<(usize, usize), (f32, usize)>> = candidates
+            .par_iter()
+            .fold(
+                || HashMap::new(),
+                |mut local_map, (suffix_idx, prefix_idx, shared_affix)| {
+                    let suffix_read = &reads[*suffix_idx];
+                    let prefix_read = &reads[*prefix_idx];
 
-    for (suffix_idx, prefix_idx, shared_affix) in &candidates {
-        let suffix_read = &reads[*suffix_idx];
-        let prefix_read = &reads[*prefix_idx];
+                    if let Some((score, overlap_len)) =
+                        verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config)
+                    {
+                        let key = (*suffix_idx, *prefix_idx);
+                        let entry = local_map.entry(key).or_insert((f32::MIN, 0));
+                        if score > entry.0 || (score == entry.0 && overlap_len > entry.1) {
+                            *entry = (score, overlap_len);
+                        }
+                    }
+                    local_map
+                },
+            )
+            .collect();
 
-        // Verify the overlap using anchor from trie
-        if let Some((score, overlap_len)) =
-            verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config)
-        {
-            let key = (*suffix_idx, *prefix_idx);
-            let prev_score = best_scores.get(&key).copied().unwrap_or(f32::MIN);
-            let prev_span = best_spans.get(&key).copied().unwrap_or(0);
-
-            if score > prev_score || (score == prev_score && overlap_len > prev_span) {
-                best_scores.insert(key, score);
-                best_spans.insert(key, overlap_len);
+        // Merge thread-local results
+        let mut best_scores = HashMap::new();
+        let mut best_spans = HashMap::new();
+        for local_map in local_results {
+            for (key, (score, span)) in local_map {
+                let prev_score = best_scores.get(&key).copied().unwrap_or(f32::MIN);
+                let prev_span = best_spans.get(&key).copied().unwrap_or(0);
+                if score > prev_score || (score == prev_score && span > prev_span) {
+                    best_scores.insert(key, score);
+                    best_spans.insert(key, span);
+                }
             }
         }
-    }
+        (best_scores, best_spans)
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let (best_scores, best_spans) = {
+        let mut best_scores: HashMap<(usize, usize), f32> = HashMap::new();
+        let mut best_spans: HashMap<(usize, usize), usize> = HashMap::new();
+
+        for (suffix_idx, prefix_idx, shared_affix) in &candidates {
+            let suffix_read = &reads[*suffix_idx];
+            let prefix_read = &reads[*prefix_idx];
+
+            if let Some((score, overlap_len)) =
+                verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config)
+            {
+                let key = (*suffix_idx, *prefix_idx);
+                let prev_score = best_scores.get(&key).copied().unwrap_or(f32::MIN);
+                let prev_span = best_spans.get(&key).copied().unwrap_or(0);
+
+                if score > prev_score || (score == prev_score && overlap_len > prev_span) {
+                    best_scores.insert(key, score);
+                    best_spans.insert(key, overlap_len);
+                }
+            }
+        }
+        (best_scores, best_spans)
+    };
 
     // Convert to CSR sparse matrices
     let mut a_indptr: Vec<usize> = Vec::with_capacity(n + 1);

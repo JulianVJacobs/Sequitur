@@ -6,6 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// A key representing an affix as a slice reference into a read.
 pub type AffixSlice = (usize, usize, usize); // (read_idx, start, end)
 
@@ -248,6 +251,37 @@ impl PrunedAffixTrie {
         // - Leaf nodes that appear in multiple reads (cross-read overlaps)
         // - Chains with cross-read links
 
+        #[cfg(feature = "parallel")]
+        {
+            // Parallel version: collect keys to remove
+            let keys_to_remove: Vec<_> = trie
+                .nodes
+                .par_iter()
+                .filter_map(|(&key, node)| {
+                    let should_keep = match node {
+                        AffixNode::Delta { .. } => true,
+                        AffixNode::Leaf => {
+                            let affix_str = &reads[key.0][key.1..key.2];
+                            trie.affix_contributors
+                                .get(affix_str)
+                                .map_or(false, |set| set.len() > 1)
+                        }
+                        AffixNode::Chain { .. } => Self::has_cross_read_link(key, node),
+                    };
+                    if should_keep {
+                        None
+                    } else {
+                        Some(key)
+                    }
+                })
+                .collect();
+
+            for key in keys_to_remove {
+                trie.nodes.remove(&key);
+            }
+        }
+
+        #[cfg(not(feature = "parallel"))]
         trie.nodes.retain(|&key, node| match node {
             AffixNode::Delta { .. } => true, // Always keep branching points and full reads (containment)
             AffixNode::Leaf => {
@@ -502,41 +536,81 @@ impl PrunedAffixTrie {
     /// Phase 3: Build k-mer index from Delta nodes for De Bruijn-like fuzzy matching.
     /// Only indexes k-mers from Delta nodes (branching points) to save memory.
     /// Further optimized: only index Delta nodes with multiple contributors (likely to have fuzzy matches).
+    /// Parallelized when 'parallel' feature is enabled.
     fn build_kmer_index(&mut self, reads: &[String]) {
-        for (&affix_key, node) in &self.nodes {
-            // Only index Delta nodes
-            if let AffixNode::Delta { .. } = node {
-                let affix_str = &reads[affix_key.0][affix_key.1..affix_key.2];
+        #[cfg(feature = "parallel")]
+        {
+            // Parallel version: build per-thread indices and merge
+            let local_indices: Vec<HashMap<String, Vec<AffixSlice>>> = self
+                .nodes
+                .par_iter()
+                .filter_map(|(&affix_key, node)| {
+                    if let AffixNode::Delta { .. } = node {
+                        let affix_str = &reads[affix_key.0][affix_key.1..affix_key.2];
+                        let contributor_count = self
+                            .affix_contributors
+                            .get(affix_str)
+                            .map_or(0, |set| set.len());
+                        if contributor_count < 2 {
+                            return None;
+                        }
 
-                // Skip low-coverage affixes (single read) - unlikely to benefit from fuzzy matching
-                let contributor_count = self
-                    .affix_contributors
-                    .get(affix_str)
-                    .map_or(0, |set| set.len());
-                if contributor_count < 2 {
-                    continue;
-                }
+                        let affix_len = affix_str.len();
+                        let max_errors = (affix_len as f32 * self.max_diff).floor() as usize;
+                        let min_kmer_len = affix_len.saturating_sub(max_errors).max(self.min_k);
+                        let kmer_len = min_kmer_len;
 
-                let affix_len = affix_str.len();
+                        let mut local_map = HashMap::new();
+                        for pos in 0..=affix_len.saturating_sub(kmer_len) {
+                            let kmer = &affix_str[pos..pos + kmer_len];
+                            local_map
+                                .entry(kmer.to_string())
+                                .or_insert_with(Vec::new)
+                                .push(affix_key);
+                        }
+                        Some(local_map)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-                // Calculate k-mer size using pigeonhole principle
-                // For affix of length L with max_diff d:
-                // - Max errors allowed: floor(L * d)
-                // - Minimal k-mer approach: only generate k-mers of size (L - max_errors)
-                // - This guarantees at least one error-free k-mer if errors ≤ max_errors
-                // - Memory: O(max_errors) k-mers per affix vs O(max_errors²) for multi-scale
-                // Example: L=8, max_diff=0.25 → max_errors=2 → only 6-mers
-                let max_errors = (affix_len as f32 * self.max_diff).floor() as usize;
-                let min_kmer_len = affix_len.saturating_sub(max_errors).max(self.min_k);
-
-                // Generate only minimal k-mers (size = min_kmer_len)
-                let kmer_len = min_kmer_len;
-                for pos in 0..=affix_len.saturating_sub(kmer_len) {
-                    let kmer = &affix_str[pos..pos + kmer_len];
+            // Merge all local indices into main kmer_to_affixes
+            for local_map in local_indices {
+                for (kmer, affixes) in local_map {
                     self.kmer_to_affixes
-                        .entry(kmer.to_string())
+                        .entry(kmer)
                         .or_insert_with(Vec::new)
-                        .push(affix_key);
+                        .extend(affixes);
+                }
+            }
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            // Sequential version
+            for (&affix_key, node) in &self.nodes {
+                if let AffixNode::Delta { .. } = node {
+                    let affix_str = &reads[affix_key.0][affix_key.1..affix_key.2];
+                    let contributor_count = self
+                        .affix_contributors
+                        .get(affix_str)
+                        .map_or(0, |set| set.len());
+                    if contributor_count < 2 {
+                        continue;
+                    }
+
+                    let affix_len = affix_str.len();
+                    let max_errors = (affix_len as f32 * self.max_diff).floor() as usize;
+                    let min_kmer_len = affix_len.saturating_sub(max_errors).max(self.min_k);
+                    let kmer_len = min_kmer_len;
+                    for pos in 0..=affix_len.saturating_sub(kmer_len) {
+                        let kmer = &affix_str[pos..pos + kmer_len];
+                        self.kmer_to_affixes
+                            .entry(kmer.to_string())
+                            .or_insert_with(Vec::new)
+                            .push(affix_key);
+                    }
                 }
             }
         }
@@ -545,62 +619,32 @@ impl PrunedAffixTrie {
     /// Phase 4: Augment extension vectors with fuzzy-reachable affixes.
     /// For each Delta node, add affixes that share k-mers (fuzzy matches within max_diff).
     /// Optimized: Use HashSets for O(1) deduplication instead of Vec::contains O(n) checks.
+    /// Parallelized when 'parallel' feature is enabled.
     fn augment_fuzzy_extensions(&mut self, reads: &[String]) {
         // Collect fuzzy extensions using HashSets for efficient deduplication
-        let mut additions: HashMap<AffixSlice, (HashSet<AffixSlice>, HashSet<AffixSlice>)> =
-            HashMap::new();
+        #[cfg(feature = "parallel")]
+        let additions: HashMap<AffixSlice, (HashSet<AffixSlice>, HashSet<AffixSlice>)> = {
+            self.nodes
+                .par_iter()
+                .filter_map(|(&source_key, _)| {
+                    self.collect_fuzzy_extensions_for_node(source_key, reads)
+                        .map(|result| (source_key, result))
+                })
+                .collect()
+        };
 
-        for (&source_key, _) in &self.nodes {
-            let source_str = &reads[source_key.0][source_key.1..source_key.2];
-            let source_len = source_str.len();
-
-            // Determine if this is a suffix or prefix based on position
-            let is_suffix = source_key.1 > 0;
-            let is_prefix = source_key.2 < reads[source_key.0].len();
-
-            // Calculate k-mer size for fuzzy lookup (same as indexing)
-            let max_errors = (source_len as f32 * self.max_diff).floor() as usize;
-            let min_kmer_len = source_len.saturating_sub(max_errors).max(self.min_k);
-
-            // Use HashSets for automatic deduplication (no contains() checks needed)
-            let (mut suffix_adds, mut prefix_adds) = (HashSet::new(), HashSet::new());
-
-            // Extract only minimal k-mers (matching indexing strategy)
-            let kmer_len = min_kmer_len;
-            for pos in 0..=source_len.saturating_sub(kmer_len) {
-                let kmer = &source_str[pos..pos + kmer_len];
-
-                if let Some(target_affixes) = self.kmer_to_affixes.get(kmer) {
-                    for &target_key in target_affixes {
-                        if target_key == source_key {
-                            continue; // Skip self
-                        }
-                        if target_key.0 == source_key.0 {
-                            continue; // Skip same read
-                        }
-
-                        // Determine if target is prefix or suffix
-                        let target_is_prefix = target_key.1 == 0;
-                        let target_is_suffix = target_key.2 == reads[target_key.0].len();
-
-                        // Add appropriate extension:
-                        // - If source is suffix and target is prefix → suffix extension
-                        // - If source is prefix and target is suffix → prefix extension
-                        if is_suffix && target_is_prefix {
-                            suffix_adds.insert(target_key);
-                        }
-                        if is_prefix && target_is_suffix {
-                            prefix_adds.insert(target_key);
-                        }
-                    }
+        #[cfg(not(feature = "parallel"))]
+        let additions: HashMap<AffixSlice, (HashSet<AffixSlice>, HashSet<AffixSlice>)> = {
+            let mut map = HashMap::new();
+            for (&source_key, _) in &self.nodes {
+                if let Some((suffix_adds, prefix_adds)) =
+                    self.collect_fuzzy_extensions_for_node(source_key, reads)
+                {
+                    map.insert(source_key, (suffix_adds, prefix_adds));
                 }
             }
-
-            // Store additions if any were found
-            if !suffix_adds.is_empty() || !prefix_adds.is_empty() {
-                additions.insert(source_key, (suffix_adds, prefix_adds));
-            }
-        }
+            map
+        };
 
         // Apply collected fuzzy extensions
         for (source_key, (suffix_adds, prefix_adds)) in additions {
@@ -624,6 +668,65 @@ impl PrunedAffixTrie {
                     }
                 }
             }
+        }
+    }
+
+    /// Helper to collect fuzzy extensions for a single node (used in parallel and sequential paths)
+    fn collect_fuzzy_extensions_for_node(
+        &self,
+        source_key: AffixSlice,
+        reads: &[String],
+    ) -> Option<(HashSet<AffixSlice>, HashSet<AffixSlice>)> {
+        let source_str = &reads[source_key.0][source_key.1..source_key.2];
+        let source_len = source_str.len();
+
+        // Determine if this is a suffix or prefix based on position
+        let is_suffix = source_key.1 > 0;
+        let is_prefix = source_key.2 < reads[source_key.0].len();
+
+        // Calculate k-mer size for fuzzy lookup (same as indexing)
+        let max_errors = (source_len as f32 * self.max_diff).floor() as usize;
+        let min_kmer_len = source_len.saturating_sub(max_errors).max(self.min_k);
+
+        // Use HashSets for automatic deduplication (no contains() checks needed)
+        let (mut suffix_adds, mut prefix_adds) = (HashSet::new(), HashSet::new());
+
+        // Extract only minimal k-mers (matching indexing strategy)
+        let kmer_len = min_kmer_len;
+        for pos in 0..=source_len.saturating_sub(kmer_len) {
+            let kmer = &source_str[pos..pos + kmer_len];
+
+            if let Some(target_affixes) = self.kmer_to_affixes.get(kmer) {
+                for &target_key in target_affixes {
+                    if target_key == source_key {
+                        continue; // Skip self
+                    }
+                    if target_key.0 == source_key.0 {
+                        continue; // Skip same read
+                    }
+
+                    // Determine if target is prefix or suffix
+                    let target_is_prefix = target_key.1 == 0;
+                    let target_is_suffix = target_key.2 == reads[target_key.0].len();
+
+                    // Add appropriate extension:
+                    // - If source is suffix and target is prefix → suffix extension
+                    // - If source is prefix and target is suffix → prefix extension
+                    if is_suffix && target_is_prefix {
+                        suffix_adds.insert(target_key);
+                    }
+                    if is_prefix && target_is_suffix {
+                        prefix_adds.insert(target_key);
+                    }
+                }
+            }
+        }
+
+        // Return additions if any were found
+        if !suffix_adds.is_empty() || !prefix_adds.is_empty() {
+            Some((suffix_adds, prefix_adds))
+        } else {
+            None
         }
     }
 }
