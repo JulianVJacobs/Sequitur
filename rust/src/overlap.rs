@@ -77,7 +77,8 @@ pub fn create_overlap_graph_unified<'a>(
     config: OverlapConfig,
 ) -> (CsMat<usize>, CsMat<usize>) {
     let min_suffix_len = config.min_suffix_len.max(1);
-    let affix_structure = AffixStructure::build(reads, min_suffix_len, config.use_trie);
+    let affix_structure =
+        AffixStructure::build(reads, min_suffix_len, config.use_trie, config.max_diff);
 
     match affix_structure {
         AffixStructure::Array(affix_map) => {
@@ -103,6 +104,7 @@ fn create_overlap_graph_from_trie(
     }
 
     let n = reads.len();
+    // Trie now includes fuzzy matches in extension vectors automatically
     let candidates = affix_trie.overlap_candidates(reads);
 
     // Build best scores and spans for each read pair
@@ -113,9 +115,9 @@ fn create_overlap_graph_from_trie(
         let suffix_read = &reads[*suffix_idx];
         let prefix_read = &reads[*prefix_idx];
 
-        // Verify the overlap with edit distance
+        // Verify the overlap using anchor from trie
         if let Some((score, overlap_len)) =
-            verify_overlap_with_parabolic(suffix_read, prefix_read, shared_affix, config)
+            verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config)
         {
             let key = (*suffix_idx, *prefix_idx);
             let prev_score = best_scores.get(&key).copied().unwrap_or(f32::MIN);
@@ -170,11 +172,66 @@ fn create_overlap_graph_from_trie(
     (adjacency, overlaps)
 }
 
-/// Verify overlap between suffix and prefix with parabolic early-out optimization.
-fn verify_overlap_with_parabolic(
+/// Verify overlap from trie anchor by extending bidirectionally from exact match.
+/// This leverages the shared_affix hint to avoid O(m²) full scan.
+/// Public for benchmarking purposes.
+pub fn verify_overlap_from_anchor(
     suffix_read: &str,
     prefix_read: &str,
-    _shared_affix: &str,
+    shared_affix: &str,
+    config: OverlapConfig,
+) -> Option<(f32, usize)> {
+    let anchor_len = shared_affix.len();
+    if anchor_len == 0 {
+        // No anchor, do simple full scan
+        return verify_overlap_simple(suffix_read, prefix_read, config);
+    }
+
+    let min_len = config.min_suffix_len.max(1);
+    let max_span = suffix_read.len().min(prefix_read.len());
+
+    let mut best_score = f32::MIN;
+    let mut best_overlap = 0;
+
+    // Start search from anchor and extend outward
+    let start_span = anchor_len.max(min_len);
+    let end_span = max_span.min(start_span + 20); // Only check ±20bp around anchor
+
+    for span in start_span..=end_span {
+        if span > suffix_read.len() || span > prefix_read.len() {
+            break;
+        }
+
+        let suffix_window = &suffix_read[suffix_read.len() - span..];
+        let prefix_window = &prefix_read[..span];
+
+        let distance = damerau_levenshtein(suffix_window, prefix_window);
+        let float_diff = distance as f32 / span as f32;
+
+        if float_diff < config.max_diff {
+            let score = (span as i32 - distance as i32) as f32;
+            if score > best_score || (score == best_score && span > best_overlap) {
+                best_score = score;
+                best_overlap = span;
+            }
+        } else if span > anchor_len + 5 {
+            // Error rate increasing beyond anchor, stop extending
+            break;
+        }
+    }
+
+    if best_score > f32::MIN {
+        Some((best_score, best_overlap))
+    } else {
+        None
+    }
+}
+
+/// Simple full-scan verification without optimizations.
+/// Used as fallback when no anchor hint exists.
+fn verify_overlap_simple(
+    suffix_read: &str,
+    prefix_read: &str,
     config: OverlapConfig,
 ) -> Option<(f32, usize)> {
     let min_len = config.min_suffix_len.max(1);
@@ -182,9 +239,6 @@ fn verify_overlap_with_parabolic(
 
     let mut best_score = f32::MIN;
     let mut best_overlap = 0;
-
-    let mut min_diff_seen = f32::MAX;
-    let mut increasing_count = 0;
 
     for span in min_len..=max_span {
         if span > suffix_read.len() || span > prefix_read.len() {
@@ -196,19 +250,6 @@ fn verify_overlap_with_parabolic(
 
         let distance = damerau_levenshtein(suffix_window, prefix_window);
         let float_diff = distance as f32 / span as f32;
-
-        // Parabolic early-out logic
-        if config.use_parabolic_cutoff && span > min_len + 5 {
-            if float_diff < min_diff_seen {
-                min_diff_seen = float_diff;
-                increasing_count = 0;
-            } else if float_diff > config.max_diff {
-                increasing_count += 1;
-                if increasing_count >= config.parabolic_patience {
-                    break; // Passed the valley, no point continuing
-                }
-            }
-        }
 
         if float_diff < config.max_diff {
             let score = (span as i32 - distance as i32) as f32;

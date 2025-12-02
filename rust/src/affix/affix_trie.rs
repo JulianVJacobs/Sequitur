@@ -137,11 +137,17 @@ pub struct PrunedAffixTrie {
 
     /// Track which reads contribute to each affix sequence
     affix_contributors: HashMap<String, HashSet<usize>>,
+
+    /// K-mer to affix index for fuzzy matching (maps k-mer → affixes containing it)
+    kmer_to_affixes: HashMap<String, Vec<AffixSlice>>,
+
+    /// Maximum normalized edit distance for fuzzy matching
+    max_diff: f32,
 }
 
 impl PrunedAffixTrie {
-    /// Build a pruned and compressed affix trie from reads.
-    pub fn build(reads: &[String], min_k: usize) -> Self {
+    /// Build a pruned and compressed affix trie from reads with fuzzy k-mer matching.
+    pub fn build(reads: &[String], min_k: usize, max_diff: f32) -> Self {
         let min_len = min_k.max(1);
         let mut trie = Self {
             nodes: HashMap::new(),
@@ -149,6 +155,8 @@ impl PrunedAffixTrie {
             min_k: min_len,
             sequence_to_key: HashMap::new(),
             affix_contributors: HashMap::new(),
+            kmer_to_affixes: HashMap::new(),
+            max_diff,
         };
 
         // Phase 1a: Insert all affixes with canonicalization
@@ -251,6 +259,13 @@ impl PrunedAffixTrie {
             }
             AffixNode::Chain { .. } => Self::has_cross_read_link(key, node),
         });
+
+        // Phase 3 & 4: K-mer fuzzy matching (only if max_diff is meaningful)
+        // Skip for very small max_diff values where fuzzy matching adds little value
+        if max_diff >= 0.1 {
+            trie.build_kmer_index(reads);
+            trie.augment_fuzzy_extensions(reads);
+        }
 
         trie
     }
@@ -472,6 +487,145 @@ impl PrunedAffixTrie {
 
         candidates
     }
+
+    /// Iterate canonical affix sequences with their contributing read indices.
+    /// Returns a vector of (affix_string, contributor_ids).
+    pub fn affix_contributor_list(&self) -> Vec<(String, Vec<usize>)> {
+        let mut out = Vec::new();
+        for (seq, set) in self.affix_contributors.iter() {
+            let ids: Vec<usize> = set.iter().copied().collect();
+            out.push((seq.clone(), ids));
+        }
+        out
+    }
+
+    /// Phase 3: Build k-mer index from Delta nodes for De Bruijn-like fuzzy matching.
+    /// Only indexes k-mers from Delta nodes (branching points) to save memory.
+    /// Further optimized: only index Delta nodes with multiple contributors (likely to have fuzzy matches).
+    fn build_kmer_index(&mut self, reads: &[String]) {
+        for (&affix_key, node) in &self.nodes {
+            // Only index Delta nodes
+            if let AffixNode::Delta { .. } = node {
+                let affix_str = &reads[affix_key.0][affix_key.1..affix_key.2];
+
+                // Skip low-coverage affixes (single read) - unlikely to benefit from fuzzy matching
+                let contributor_count = self
+                    .affix_contributors
+                    .get(affix_str)
+                    .map_or(0, |set| set.len());
+                if contributor_count < 2 {
+                    continue;
+                }
+
+                let affix_len = affix_str.len();
+
+                // Calculate k-mer size using pigeonhole principle
+                // For affix of length L with max_diff d:
+                // - Max errors allowed: floor(L * d)
+                // - Minimal k-mer approach: only generate k-mers of size (L - max_errors)
+                // - This guarantees at least one error-free k-mer if errors ≤ max_errors
+                // - Memory: O(max_errors) k-mers per affix vs O(max_errors²) for multi-scale
+                // Example: L=8, max_diff=0.25 → max_errors=2 → only 6-mers
+                let max_errors = (affix_len as f32 * self.max_diff).floor() as usize;
+                let min_kmer_len = affix_len.saturating_sub(max_errors).max(self.min_k);
+
+                // Generate only minimal k-mers (size = min_kmer_len)
+                let kmer_len = min_kmer_len;
+                for pos in 0..=affix_len.saturating_sub(kmer_len) {
+                    let kmer = &affix_str[pos..pos + kmer_len];
+                    self.kmer_to_affixes
+                        .entry(kmer.to_string())
+                        .or_insert_with(Vec::new)
+                        .push(affix_key);
+                }
+            }
+        }
+    }
+
+    /// Phase 4: Augment extension vectors with fuzzy-reachable affixes.
+    /// For each Delta node, add affixes that share k-mers (fuzzy matches within max_diff).
+    /// Optimized: Use HashSets for O(1) deduplication instead of Vec::contains O(n) checks.
+    fn augment_fuzzy_extensions(&mut self, reads: &[String]) {
+        // Collect fuzzy extensions using HashSets for efficient deduplication
+        let mut additions: HashMap<AffixSlice, (HashSet<AffixSlice>, HashSet<AffixSlice>)> =
+            HashMap::new();
+
+        for (&source_key, _) in &self.nodes {
+            let source_str = &reads[source_key.0][source_key.1..source_key.2];
+            let source_len = source_str.len();
+
+            // Determine if this is a suffix or prefix based on position
+            let is_suffix = source_key.1 > 0;
+            let is_prefix = source_key.2 < reads[source_key.0].len();
+
+            // Calculate k-mer size for fuzzy lookup (same as indexing)
+            let max_errors = (source_len as f32 * self.max_diff).floor() as usize;
+            let min_kmer_len = source_len.saturating_sub(max_errors).max(self.min_k);
+
+            // Use HashSets for automatic deduplication (no contains() checks needed)
+            let (mut suffix_adds, mut prefix_adds) = (HashSet::new(), HashSet::new());
+
+            // Extract only minimal k-mers (matching indexing strategy)
+            let kmer_len = min_kmer_len;
+            for pos in 0..=source_len.saturating_sub(kmer_len) {
+                let kmer = &source_str[pos..pos + kmer_len];
+
+                if let Some(target_affixes) = self.kmer_to_affixes.get(kmer) {
+                    for &target_key in target_affixes {
+                        if target_key == source_key {
+                            continue; // Skip self
+                        }
+                        if target_key.0 == source_key.0 {
+                            continue; // Skip same read
+                        }
+
+                        // Determine if target is prefix or suffix
+                        let target_is_prefix = target_key.1 == 0;
+                        let target_is_suffix = target_key.2 == reads[target_key.0].len();
+
+                        // Add appropriate extension:
+                        // - If source is suffix and target is prefix → suffix extension
+                        // - If source is prefix and target is suffix → prefix extension
+                        if is_suffix && target_is_prefix {
+                            suffix_adds.insert(target_key);
+                        }
+                        if is_prefix && target_is_suffix {
+                            prefix_adds.insert(target_key);
+                        }
+                    }
+                }
+            }
+
+            // Store additions if any were found
+            if !suffix_adds.is_empty() || !prefix_adds.is_empty() {
+                additions.insert(source_key, (suffix_adds, prefix_adds));
+            }
+        }
+
+        // Apply collected fuzzy extensions
+        for (source_key, (suffix_adds, prefix_adds)) in additions {
+            if let Some(node) = self.nodes.get_mut(&source_key) {
+                if let AffixNode::Delta {
+                    prefix_extensions,
+                    suffix_extensions,
+                    ..
+                } = node
+                {
+                    // Extend with deduplicated additions
+                    for target in suffix_adds {
+                        if !suffix_extensions.contains(&target) {
+                            suffix_extensions.push(target);
+                        }
+                    }
+                    for target in prefix_adds {
+                        if !prefix_extensions.contains(&target) {
+                            prefix_extensions.push(target);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -481,7 +635,7 @@ mod tests {
     #[test]
     fn builds_trie_for_simple_reads() {
         let reads = vec!["ACGT".to_string(), "GTAA".to_string()];
-        let trie = PrunedAffixTrie::build(&reads, 2);
+        let trie = PrunedAffixTrie::build(&reads, 2, 0.25);
 
         // Should have nodes for overlapping affixes
         assert!(!trie.nodes.is_empty());
@@ -497,7 +651,7 @@ mod tests {
     #[test]
     fn prunes_nodes_without_overlaps() {
         let reads = vec!["AAAA".to_string(), "TTTT".to_string()];
-        let trie = PrunedAffixTrie::build(&reads, 2);
+        let trie = PrunedAffixTrie::build(&reads, 2, 0.25);
 
         // Should have few or no nodes since no overlaps exist
         let candidates = trie.overlap_candidates(&reads);
@@ -510,7 +664,7 @@ mod tests {
     #[test]
     fn handles_empty_reads() {
         let reads: Vec<String> = vec![];
-        let trie = PrunedAffixTrie::build(&reads, 3);
+        let trie = PrunedAffixTrie::build(&reads, 3, 0.25);
 
         assert!(trie.nodes.is_empty());
         assert!(trie.roots.is_empty());
@@ -521,7 +675,7 @@ mod tests {
     fn handles_contained_reads() {
         // read1 is a prefix of read2 (containment via prefix)
         let reads = vec!["ACGTACGT".to_string(), "ACGTACGTAA".to_string()];
-        let trie = PrunedAffixTrie::build(&reads, 3);
+        let trie = PrunedAffixTrie::build(&reads, 3, 0.25);
 
         // Should find overlaps
         let candidates = trie.overlap_candidates(&reads);
@@ -543,7 +697,7 @@ mod tests {
         // Two reads where a suffix of read1 equals a prefix of read2
         // read1 suffix "ACG" matches read2 prefix "ACG"
         let reads = vec!["TTACG".to_string(), "ACGAA".to_string()];
-        let trie = PrunedAffixTrie::build(&reads, 3);
+        let trie = PrunedAffixTrie::build(&reads, 3, 0.25);
 
         // The shared "ACG" affix should be canonicalized
         let acg_key = trie.sequence_to_key.get("ACG");

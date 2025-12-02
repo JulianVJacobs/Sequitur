@@ -19,9 +19,9 @@ pub enum AffixStructure<'a> {
 
 impl<'a> AffixStructure<'a> {
     /// Build an affix structure using the specified implementation.
-    pub fn build(reads: &'a [String], min_suffix_len: usize, use_trie: bool) -> Self {
+    pub fn build(reads: &'a [String], min_suffix_len: usize, use_trie: bool, max_diff: f32) -> Self {
         if use_trie {
-            Self::Trie(PrunedAffixTrie::build(reads, min_suffix_len))
+            Self::Trie(PrunedAffixTrie::build(reads, min_suffix_len, max_diff))
         } else {
             Self::Array(AffixMap::build(reads, min_suffix_len))
         }
@@ -33,8 +33,8 @@ impl<'a> AffixStructure<'a> {
     }
 
     /// Build using the trie implementation.
-    pub fn build_trie(reads: &'a [String], min_suffix_len: usize) -> Self {
-        Self::Trie(PrunedAffixTrie::build(reads, min_suffix_len))
+    pub fn build_trie(reads: &'a [String], min_suffix_len: usize, max_diff: f32) -> Self {
+        Self::Trie(PrunedAffixTrie::build(reads, min_suffix_len, max_diff))
     }
 
     /// Check if this is a trie implementation.

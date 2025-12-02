@@ -34,3 +34,14 @@ features = ["extension-module", "auto-initialize"]
 [features]
 parallel = ["rayon"]
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+
+[[bench]]
+name = "overlap_benchmark"
+harness = false
+
+[[bench]]
+name = "sequitur_benchmark"
+harness = false

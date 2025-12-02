@@ -23,8 +23,8 @@ pub use matching::{
     relabel_rows,
 };
 pub use overlap::{
-    create_overlap_graph, normalised_damerau_levenshtein_distance, Adjacency, OverlapConfig,
-    OverlapLengths,
+    compute_edge_confidences, create_overlap_graph, create_overlap_graph_unified,
+    normalised_damerau_levenshtein_distance, Adjacency, OverlapConfig, OverlapLengths,
 };
 
 // TODO: export a compact public API mirroring the Python core
