@@ -12,8 +12,7 @@ use clap::Parser;
 use flate2::read::MultiGzDecoder;
 
 use sequitur_rs::{
-    analyse_alternatives, create_overlap_graph, find_first_subdiagonal_path, AffixMap,
-    OverlapConfig,
+    analyse_alternatives, create_overlap_graph_unified, find_first_subdiagonal_path, OverlapConfig,
 };
 
 /// Sequitur Rust CLI (prototype)
@@ -88,10 +87,13 @@ struct Args {
     /// Use the original array-based affix structure instead of the trie (trie is default)
     #[arg(long)]
     use_array: bool,
+
+    /// Maximum normalised edit fraction for overlaps (e.g., 0.25). <0.1 disables fuzzy k-mer augmentation.
+    #[arg(long, default_value_t = 0.25)]
+    max_diff: f32,
 }
 
 fn main() {
-    log::info!("[LOGGER TEST] Logger initialized and output visible at info level");
     let args = Args::parse();
     // Set log level based on CLI flags
     let log_level = if args.trace {
@@ -131,6 +133,7 @@ fn main() {
         args.threads,
         args.max_workers,
         args.use_array,
+        args.max_diff,
     ) {
         eprintln!("Assembly failed: {error:?}");
         std::process::exit(1);
@@ -283,6 +286,7 @@ fn run_pipeline(
     use_threads: bool,
     max_workers: usize,
     use_array: bool,
+    max_diff_cli: f32,
 ) -> Result<String> {
     let reads1 = read_sequences(Path::new(reads1_path))
         .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
@@ -302,23 +306,20 @@ fn run_pipeline(
     let mut reads = Vec::with_capacity(reads1_count + reads2_count);
     reads.extend(reads1.iter().cloned());
     reads.extend(reads2.iter().cloned());
-    // Build affix array and overlap graph
-    info!("Building affix map...");
-    let affix_map = AffixMap::build(&reads, 3);
-    info!(
-        "Affix map built with {} unique affixes.",
-        affix_map.keys.len()
-    );
-
     let config = OverlapConfig {
         use_threads,
         max_workers,
         use_trie: !use_array,
+        max_diff: max_diff_cli,
         ..OverlapConfig::default()
     };
-    info!("Creating overlap graph...");
-    let (_affix_map, mut adjacency_matrix, overlap_matrix) =
-        create_overlap_graph(&reads, Some(affix_map), config);
+    if config.use_trie {
+        info!("Using pruned affix trie (unified path)");
+    } else {
+        info!("Using affix array (legacy path)");
+    }
+    info!("Creating overlap graph (unified)...");
+    let (mut adjacency_matrix, overlap_matrix) = create_overlap_graph_unified(&reads, config);
     info!("Overlap graph created.");
 
     let reference = if let Some(path) = reference_path {
@@ -523,6 +524,7 @@ mod smoke {
             false, // use_threads
             1,     // max_workers
             false, // use_array
+            0.25,
         );
         assert!(res.is_ok());
     }

@@ -151,6 +151,12 @@ pub struct PrunedAffixTrie {
 impl PrunedAffixTrie {
     /// Build a pruned and compressed affix trie from reads with fuzzy k-mer matching.
     pub fn build(reads: &[String], min_k: usize, max_diff: f32) -> Self {
+        log::info!(
+            "Building affix trie for {} reads (min_k={}, max_diff={:.2})",
+            reads.len(),
+            min_k,
+            max_diff
+        );
         let min_len = min_k.max(1);
         let mut trie = Self {
             nodes: HashMap::new(),
@@ -174,32 +180,45 @@ impl PrunedAffixTrie {
                 let sequence = &read[0..end];
 
                 // Track that this read has this affix
-                trie.affix_contributors
+                let contrib_set = trie
+                    .affix_contributors
                     .entry(sequence.to_string())
-                    .or_default()
-                    .insert(read_idx);
+                    .or_default();
+                contrib_set.insert(read_idx);
 
-                // Canonicalize: reuse existing key if sequence seen before
-                let key = if let Some(&existing_key) = trie.sequence_to_key.get(sequence) {
-                    existing_key
-                } else {
-                    let new_key = (read_idx, 0, end);
-                    trie.nodes.insert(new_key, AffixNode::Leaf);
-                    trie.sequence_to_key.insert(sequence.to_string(), new_key);
-
-                    // Track k-mers (minimum length affixes)
-                    if end == min_len {
-                        trie.roots.push(new_key);
+                // Only materialize nodes for substrings present in >=2 reads
+                // Always materialize the full-read prefix to support containment tracking
+                let is_full_read = end == read_len;
+                let key_opt = if is_full_read || contrib_set.len() >= 2 {
+                    // Canonicalize: reuse existing key if sequence seen before
+                    if let Some(&existing_key) = trie.sequence_to_key.get(sequence) {
+                        Some(existing_key)
+                    } else {
+                        let new_key = (read_idx, 0, end);
+                        trie.nodes.insert(new_key, AffixNode::Leaf);
+                        trie.sequence_to_key.insert(sequence.to_string(), new_key);
+                        // Track k-mers (minimum length affixes)
+                        if end == min_len {
+                            trie.roots.push(new_key);
+                        }
+                        Some(new_key)
                     }
-
-                    new_key
+                } else {
+                    None
                 };
 
                 // Phase 1b: Link to PREFIX parent (longer prefix = one char added right/end)
                 if end < read_len {
                     let parent_seq = &read[0..end + 1];
-                    if let Some(&parent_key) = trie.sequence_to_key.get(parent_seq) {
-                        Self::insert_extension(&mut trie.nodes, parent_key, key, Direction::Prefix);
+                    if let (Some(child_key), Some(&parent_key)) =
+                        (key_opt, trie.sequence_to_key.get(parent_seq))
+                    {
+                        Self::insert_extension(
+                            &mut trie.nodes,
+                            parent_key,
+                            child_key,
+                            Direction::Prefix,
+                        );
                     }
                 }
             }
@@ -210,40 +229,64 @@ impl PrunedAffixTrie {
                 let sequence = &read[start..read_len];
 
                 // Track that this read has this affix
-                trie.affix_contributors
+                let contrib_set = trie
+                    .affix_contributors
                     .entry(sequence.to_string())
-                    .or_default()
-                    .insert(read_idx);
+                    .or_default();
+                contrib_set.insert(read_idx);
 
-                // Canonicalize: reuse existing key if sequence seen before
-                let key = if let Some(&existing_key) = trie.sequence_to_key.get(sequence) {
-                    existing_key
-                } else {
-                    let new_key = (read_idx, start, read_len);
-                    trie.nodes.insert(new_key, AffixNode::Leaf);
-                    trie.sequence_to_key.insert(sequence.to_string(), new_key);
-
-                    // Track k-mers (minimum length affixes)
-                    if read_len - start == min_len {
-                        trie.roots.push(new_key);
+                // Only materialize nodes for substrings present in >=2 reads
+                let key_opt = if contrib_set.len() >= 2 {
+                    // Canonicalize: reuse existing key if sequence seen before
+                    if let Some(&existing_key) = trie.sequence_to_key.get(sequence) {
+                        Some(existing_key)
+                    } else {
+                        let new_key = (read_idx, start, read_len);
+                        trie.nodes.insert(new_key, AffixNode::Leaf);
+                        trie.sequence_to_key.insert(sequence.to_string(), new_key);
+                        // Track k-mers (minimum length affixes)
+                        if read_len - start == min_len {
+                            trie.roots.push(new_key);
+                        }
+                        Some(new_key)
                     }
-
-                    new_key
+                } else {
+                    None
                 };
 
                 // Phase 1b: Link to SUFFIX parent (longer suffix = one char added left/start)
                 if start > 1 {
                     let parent_seq = &read[start - 1..read_len];
-                    if let Some(&parent_key) = trie.sequence_to_key.get(parent_seq) {
-                        Self::insert_extension(&mut trie.nodes, parent_key, key, Direction::Suffix);
+                    if let (Some(child_key), Some(&parent_key)) =
+                        (key_opt, trie.sequence_to_key.get(parent_seq))
+                    {
+                        Self::insert_extension(
+                            &mut trie.nodes,
+                            parent_key,
+                            child_key,
+                            Direction::Suffix,
+                        );
                     }
                 }
             }
 
-            // Phase 1c: Mark full read
+            // Phase 1c: Mark full read (if key exists - it may be canonicalized to another read's key)
             let full_key = (read_idx, 0, read_len);
+            if !trie.nodes.contains_key(&full_key) {
+                // Ensure full read node exists even if unique to this read
+                trie.nodes.insert(full_key, AffixNode::Leaf);
+                trie.sequence_to_key
+                    .entry(read[0..read_len].to_string())
+                    .or_insert(full_key);
+            }
             Self::mark_full_read(&mut trie.nodes, full_key, read_idx);
         }
+
+        log::info!(
+            "Phase 1 complete: {} nodes, {} roots",
+            trie.nodes.len(),
+            trie.roots.len()
+        );
 
         // Phase 2: Prune nodes without cross-read connections
         // Retain:
@@ -294,11 +337,20 @@ impl PrunedAffixTrie {
             AffixNode::Chain { .. } => Self::has_cross_read_link(key, node),
         });
 
+        log::info!("Phase 2 complete: pruned to {} nodes", trie.nodes.len());
+
         // Phase 3 & 4: K-mer fuzzy matching (only if max_diff is meaningful)
         // Skip for very small max_diff values where fuzzy matching adds little value
         if max_diff >= 0.1 {
+            log::info!("Building k-mer index for fuzzy matching...");
             trie.build_kmer_index(reads);
+            log::info!(
+                "K-mer index built with {} entries",
+                trie.kmer_to_affixes.len()
+            );
+            log::info!("Augmenting fuzzy extensions...");
             trie.augment_fuzzy_extensions(reads);
+            log::info!("Fuzzy extensions augmented");
         }
 
         trie

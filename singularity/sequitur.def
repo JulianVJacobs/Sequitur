@@ -31,7 +31,7 @@ From: alpine:3.18
     # Clone the repository and build the Rust release binary
     git clone https://github.com/JulianVJacobs/Sequitur.git /opt/sequitur
     cd /opt/sequitur/rust
-    /root/.cargo/bin/cargo build --release
+    /root/.cargo/bin/cargo build --release --features parallel
 
     # Install the built binary to a standard location (if present)
     install -Dm755 target/release/sequitur_rs /usr/local/bin/sequitur_rs || true

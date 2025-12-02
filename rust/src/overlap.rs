@@ -108,9 +108,12 @@ fn create_overlap_graph_from_trie(
 
     let n = reads.len();
     // Trie now includes fuzzy matches in extension vectors automatically
+    log::info!("Collecting overlap candidates from trie...");
     let candidates = affix_trie.overlap_candidates(reads);
+    log::info!("Found {} candidate pairs", candidates.len());
 
     // Build best scores and spans for each read pair
+    log::info!("Verifying {} candidates...", candidates.len());
     #[cfg(feature = "parallel")]
     let (best_scores, best_spans) = {
         // Parallel verification with thread-local HashMaps
