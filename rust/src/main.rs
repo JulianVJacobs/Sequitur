@@ -1,5 +1,5 @@
 use env_logger;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -11,9 +11,7 @@ use bio::io::{fasta, fastq};
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
 
-use sequitur_rs::{
-    analyse_alternatives, create_overlap_graph_unified, find_first_subdiagonal_path, OverlapConfig,
-};
+use sequitur_rs::{create_overlap_graph_unified, find_first_subdiagonal_path, OverlapConfig};
 
 /// Sequitur Rust CLI (prototype)
 #[derive(Parser, Debug)]
@@ -26,6 +24,11 @@ struct Args {
     /// Optional CSV file to export overlap matrix (overlap lengths)
     #[arg(long)]
     export_overlap_csv: Option<String>,
+
+    /// Optional JSON file to export read index-to-sequence mapping
+    #[arg(long)]
+    export_read_map: Option<String>,
+
     /// Enable threaded overlap graph construction (default: off)
     #[arg(long, default_value_t = false)]
     threads: bool,
@@ -55,10 +58,8 @@ struct Args {
     #[arg(long)]
     metrics_csv: Option<String>,
 
-    /// Detect and report alternative assembly paths and cycles
-    #[arg(long)]
-    analyse_alternatives: bool,
-
+    // Deprecated: alternatives are exported via --alternatives-json
+    // (previous --analyse-alternatives flag removed)
     /// Maximum score gap for alternative paths (default: no filter)
     #[arg(long)]
     score_gap: Option<f64>,
@@ -98,6 +99,10 @@ struct Args {
     /// Maximum normalised edit fraction for overlaps (e.g., 0.25). <0.1 disables fuzzy k-mer augmentation.
     #[arg(long, default_value_t = 0.25)]
     max_diff: f32,
+
+    /// Minimum suffix/overlap length to consider (filters tiny overlaps)
+    #[arg(long, default_value_t = sequitur_rs::DEFAULT_MIN_SUFFIX_LEN)]
+    min_suffix_len: usize,
 }
 
 fn main() {
@@ -129,7 +134,6 @@ fn main() {
         &args.reads2,
         args.output_fasta.as_deref(),
         args.reference.as_deref(),
-        args.analyse_alternatives,
         args.score_gap,
         args.alternatives_json.as_deref(),
         args.verbose,
@@ -141,8 +145,10 @@ fn main() {
         args.max_workers,
         args.use_array,
         args.max_diff,
+        args.min_suffix_len,
         args.export_adjacency_csv.as_deref(),
         args.export_overlap_csv.as_deref(),
+        args.export_read_map.as_deref(),
     ) {
         eprintln!("Assembly failed: {error:?}");
         std::process::exit(1);
@@ -284,7 +290,6 @@ fn run_pipeline(
     reads2_path: &str,
     output_fasta: Option<&str>,
     reference_path: Option<&str>,
-    analyse_alts: bool,
     score_gap: Option<f64>,
     alternatives_json: Option<&str>,
     verbose: bool,
@@ -296,8 +301,10 @@ fn run_pipeline(
     max_workers: usize,
     use_array: bool,
     max_diff_cli: f32,
+    min_suffix_len_cli: usize,
     export_adjacency_csv: Option<&str>,
     export_overlap_csv: Option<&str>,
+    export_read_map: Option<&str>,
 ) -> Result<String> {
     let reads1 = read_sequences(Path::new(reads1_path))
         .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
@@ -317,11 +324,52 @@ fn run_pipeline(
     let mut reads = Vec::with_capacity(reads1_count + reads2_count);
     reads.extend(reads1.iter().cloned());
     reads.extend(reads2.iter().cloned());
+
+    // Export read map as JSON if requested
+    if let Some(json_path) = export_read_map {
+        use serde_json::json;
+        use std::io::Write;
+        if let Some(parent) = Path::new(json_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let read_map: Vec<_> = (0..reads.len())
+            .map(|idx| {
+                if idx < reads1_count {
+                    json!({
+                        "matrix_index": idx,
+                        "source": "reads1",
+                        "source_index": idx
+                    })
+                } else {
+                    json!({
+                        "matrix_index": idx,
+                        "source": "reads2",
+                        "source_index": idx - reads1_count
+                    })
+                }
+            })
+            .collect();
+        let metadata = json!({
+            "reads1_path": reads1_path,
+            "reads2_path": reads2_path,
+            "reads1_count": reads1_count,
+            "reads2_count": reads2_count,
+            "reverse_complemented": !no_revcomp,
+            "read_map": read_map
+        });
+        let mut file = std::fs::File::create(json_path)?;
+        writeln!(file, "{}", serde_json::to_string_pretty(&metadata)?)?;
+        info!("Read map exported to {}", json_path);
+    }
+
     let config = OverlapConfig {
         use_threads,
         max_workers,
         use_trie: !use_array,
         max_diff: max_diff_cli,
+        min_suffix_len: min_suffix_len_cli,
         ..OverlapConfig::default()
     };
     if config.use_trie {
@@ -331,11 +379,17 @@ fn run_pipeline(
     }
     info!("Creating overlap graph (unified)...");
     let (mut adjacency_matrix, overlap_matrix) = create_overlap_graph_unified(&reads, config);
-    // Export adjacency matrix as CSV if requested
+
+    // No separate export_read_alternatives path; use alternatives_json below
+
+    // Export adjacency matrix as CSV if requested (deprecated)
     if let Some(csv_path) = export_adjacency_csv {
+        warn!(
+            "--export-adjacency-csv is deprecated; prefer --alternatives-json for compact graph export"
+        );
         use std::io::Write;
         let mut file = std::fs::File::create(csv_path)?;
-        writeln!(file, "row_idx,col_idx,edit_distance")?;
+        writeln!(file, "row_idx,col_idx,weight")?;
         for (row_idx, row_vec) in adjacency_matrix.outer_iterator().enumerate() {
             for (col_idx, &weight) in row_vec.indices().iter().zip(row_vec.data().iter()) {
                 writeln!(file, "{},{},{}", row_idx, col_idx, weight)?;
@@ -344,8 +398,11 @@ fn run_pipeline(
         info!("Adjacency matrix exported to {}", csv_path);
     }
 
-    // Export overlap matrix as CSV if requested
+    // Export overlap matrix as CSV if requested (deprecated)
     if let Some(csv_path) = export_overlap_csv {
+        warn!(
+            "--export-overlap-csv is deprecated; prefer --alternatives-json for compact graph export"
+        );
         use std::io::Write;
         let mut file = std::fs::File::create(csv_path)?;
         writeln!(file, "row_idx,col_idx,overlap_length")?;
@@ -409,42 +466,46 @@ fn run_pipeline(
     let assembled = find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
     debug!("[DEBUG] Assembly path: {:?}", assembled);
 
-    // Analyse alternative paths if requested
-    if analyse_alts {
+    // Export combined alternatives JSON if requested (per-read successors + summary)
+    if let Some(json_path) = alternatives_json {
+        use sequitur_rs::{analyse_alternatives, extract_read_alternatives};
+        use serde_json::json;
         let analysis = analyse_alternatives(&adjacency_csc, score_gap);
         info!("[ALT] Swap squares detected: {}", analysis.squares.len());
-        info!("[ALT] Cycles detected: {}", analysis.cycles.len());
-        info!("[ALT] Linear chains: {}", analysis.chains.len());
-        info!("[ALT] Total ambiguous pos: {}", analysis.ambiguity_count);
-        if !analysis.cycles.is_empty() {
-            debug!("[ALT] Cycle positions: {:?}", analysis.cycles);
-        }
-        if !analysis.chains.is_empty() {
-            debug!("[ALT] Chain positions: {:?}", analysis.chains);
-        }
-        if let Some(json_path) = alternatives_json {
-            use serde_json::json;
-            let squares_json: Vec<_> = analysis
-                .squares
-                .iter()
-                .map(|sq| json!({"i": sq.i, "j": sq.j, "delta": sq.delta}))
-                .collect();
-            let output = json!({
-                "squares": squares_json,
-                "components": analysis.components,
-                "cycles": analysis.cycles,
-                "chains": analysis.chains,
-                "ambiguity_count": analysis.ambiguity_count,
-            });
-            if let Some(parent) = Path::new(json_path).parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent)?;
-                }
+        info!(
+            "[ALT] Components: {} ({} cycles, {} chains)",
+            analysis.components.len(),
+            analysis.cycles.len(),
+            analysis.chains.len()
+        );
+        let squares_json: Vec<_> = analysis
+            .squares
+            .iter()
+            .map(|sq| json!({"i": sq.i, "j": sq.j, "delta": sq.delta}))
+            .collect();
+        let summary = json!({
+            "squares": squares_json,
+            "components": analysis.components,
+            "cycles": analysis.cycles,
+            "chains": analysis.chains,
+            "ambiguity_count": analysis.ambiguity_count,
+        });
+        let per_read = extract_read_alternatives(&adjacency_matrix, &overlap_matrix);
+        if let Some(parent) = Path::new(json_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
             }
-            let mut file = File::create(json_path)?;
-            writeln!(file, "{}", serde_json::to_string_pretty(&output)?)?;
-            info!("[ALT] Alternative analysis written to {}", json_path);
         }
+        let combined = json!({
+            "summary": summary,
+            "per_read": per_read,
+        });
+        let mut file = File::create(json_path)?;
+        writeln!(file, "{}", serde_json::to_string_pretty(&combined)?)?;
+        info!(
+            "[ALT] Alternatives (summary + per_read) written to {}",
+            json_path
+        );
     }
 
     if let Some(path) = output_fasta {
@@ -549,7 +610,6 @@ mod smoke {
             tmp2.path().to_str().unwrap(),
             None,
             None,
-            false,
             None,
             None,
             false,
@@ -561,8 +621,10 @@ mod smoke {
             1,     // max_workers
             false, // use_array
             0.25,
+            sequitur_rs::DEFAULT_MIN_SUFFIX_LEN,
             None, // export_adjacency_csv
             None, // export_overlap_csv
+            None, // export_read_map
         );
         assert!(res.is_ok());
     }

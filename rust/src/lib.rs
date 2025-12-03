@@ -15,8 +15,9 @@ pub use affix::{
 };
 pub mod python_bindings;
 pub use alternative_paths::{
-    analyse_alternatives, build_swap_graph, detect_swap_squares, find_connected_components,
-    is_cycle, AlternativesAnalysis, SwapSquare,
+    analyse_alternatives, build_swap_graph, detect_swap_squares, extract_read_alternatives,
+    find_connected_components, is_cycle, AlternativesAnalysis, ReadAlternative, ReadAlternatives,
+    SwapSquare,
 };
 pub use matching::{
     adjacency_to_csc, adjacency_to_sparse, find_first_subdiagonal_path, relabel_columns,

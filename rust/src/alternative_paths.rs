@@ -341,3 +341,59 @@ mod tests {
         assert!(!is_cycle(&components[0], &graph));
     }
 }
+
+/// Per-read alternative paths structure for JSON export.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadAlternative {
+    pub target: usize,
+    pub score: usize,
+    pub overlap_length: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadAlternatives {
+    pub read_index: usize,
+    pub successors: Vec<ReadAlternative>,
+}
+
+/// Extract per-read alternatives from adjacency and overlap matrices.
+///
+/// For each read, list all possible successors with their scores and overlap lengths.
+/// This provides a compact view of the assembly graph suitable for analysis.
+pub fn extract_read_alternatives(
+    adjacency: &CsMat<usize>,
+    overlap: &CsMat<usize>,
+) -> Vec<ReadAlternatives> {
+    let mut results = Vec::new();
+
+    for (read_idx, adj_row) in adjacency.outer_iterator().enumerate() {
+        let ovl_row = overlap.outer_view(read_idx).unwrap();
+
+        let mut successors = Vec::new();
+
+        for (target, &score) in adj_row.iter() {
+            let overlap_length = ovl_row.get(target).copied().unwrap_or(0);
+            successors.push(ReadAlternative {
+                target,
+                score,
+                overlap_length,
+            });
+        }
+
+        // Sort by score descending, then by overlap length descending
+        successors.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| b.overlap_length.cmp(&a.overlap_length))
+        });
+
+        if !successors.is_empty() {
+            results.push(ReadAlternatives {
+                read_index: read_idx,
+                successors,
+            });
+        }
+    }
+
+    results
+}
