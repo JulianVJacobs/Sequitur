@@ -55,6 +55,7 @@ pub fn normalised_damerau_levenshtein_distance(
     prefix: &str,
 ) -> Option<(f32, f32, usize)> {
     let overlap_len = suffix.len().min(prefix.len());
+    let longer_len = suffix.len().max(prefix.len());
     if overlap_len == 0 {
         return None;
     }
@@ -67,7 +68,8 @@ pub fn normalised_damerau_levenshtein_distance(
         return None;
     }
 
-    let diff = distance as f32 / overlap_len as f32;
+    // Normalize by longer read length to penalize insertions/deletions
+    let diff = distance as f32 / longer_len as f32;
     let score = 1.0 - diff;
     Some((diff, score, overlap_len))
 }
