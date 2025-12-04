@@ -17,14 +17,6 @@ use sequitur_rs::{create_overlap_graph_unified, find_first_subdiagonal_path, Ove
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Optional CSV file to export adjacency matrix (edit distances)
-    #[arg(long)]
-    export_adjacency_csv: Option<String>,
-
-    /// Optional CSV file to export overlap matrix (overlap lengths)
-    #[arg(long)]
-    export_overlap_csv: Option<String>,
-
     /// Optional JSON file to export read index-to-sequence mapping
     #[arg(long)]
     export_read_map: Option<String>,
@@ -146,8 +138,6 @@ fn main() {
         args.use_array,
         args.max_diff,
         args.min_suffix_len,
-        args.export_adjacency_csv.as_deref(),
-        args.export_overlap_csv.as_deref(),
         args.export_read_map.as_deref(),
     ) {
         eprintln!("Assembly failed: {error:?}");
@@ -302,8 +292,6 @@ fn run_pipeline(
     use_array: bool,
     max_diff_cli: f32,
     min_suffix_len_cli: usize,
-    export_adjacency_csv: Option<&str>,
-    export_overlap_csv: Option<&str>,
     export_read_map: Option<&str>,
 ) -> Result<String> {
     let reads1 = read_sequences(Path::new(reads1_path))
@@ -380,39 +368,6 @@ fn run_pipeline(
     info!("Creating overlap graph (unified)...");
     let (mut adjacency_matrix, overlap_matrix) = create_overlap_graph_unified(&reads, config);
 
-    // No separate export_read_alternatives path; use alternatives_json below
-
-    // Export adjacency matrix as CSV if requested (deprecated)
-    if let Some(csv_path) = export_adjacency_csv {
-        warn!(
-            "--export-adjacency-csv is deprecated; prefer --alternatives-json for compact graph export"
-        );
-        use std::io::Write;
-        let mut file = std::fs::File::create(csv_path)?;
-        writeln!(file, "row_idx,col_idx,weight")?;
-        for (row_idx, row_vec) in adjacency_matrix.outer_iterator().enumerate() {
-            for (col_idx, &weight) in row_vec.indices().iter().zip(row_vec.data().iter()) {
-                writeln!(file, "{},{},{}", row_idx, col_idx, weight)?;
-            }
-        }
-        info!("Adjacency matrix exported to {}", csv_path);
-    }
-
-    // Export overlap matrix as CSV if requested (deprecated)
-    if let Some(csv_path) = export_overlap_csv {
-        warn!(
-            "--export-overlap-csv is deprecated; prefer --alternatives-json for compact graph export"
-        );
-        use std::io::Write;
-        let mut file = std::fs::File::create(csv_path)?;
-        writeln!(file, "row_idx,col_idx,overlap_length")?;
-        for (row_idx, row_vec) in overlap_matrix.outer_iterator().enumerate() {
-            for (col_idx, &length) in row_vec.indices().iter().zip(row_vec.data().iter()) {
-                writeln!(file, "{},{},{}", row_idx, col_idx, length)?;
-            }
-        }
-        info!("Overlap matrix exported to {}", csv_path);
-    }
     info!("Overlap graph created.");
 
     let reference = if let Some(path) = reference_path {
@@ -622,8 +577,6 @@ mod smoke {
             false, // use_array
             0.25,
             sequitur_rs::DEFAULT_MIN_SUFFIX_LEN,
-            None, // export_adjacency_csv
-            None, // export_overlap_csv
             None, // export_read_map
         );
         assert!(res.is_ok());
