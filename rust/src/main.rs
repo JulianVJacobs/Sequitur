@@ -17,7 +17,7 @@ use sequitur_rs::{create_overlap_graph_unified, find_first_subdiagonal_path, Ove
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Optional JSON file to export read index-to-sequence mapping
+    /// Optional NDJSON file (.jsonl) to export read index-to-sequence mapping
     #[arg(long)]
     export_read_map: Option<String>,
 
@@ -42,9 +42,9 @@ struct Args {
     #[arg(long)]
     output_fasta: Option<String>,
 
-    /// Optional output file for assembly graph (JSON edge list with node attributes)
+    /// Optional output file for assembly graph (NDJSON .jsonl format with edge list and node attributes)
     #[arg(long)]
-    export_graph_json: Option<String>,
+    export_graph_jsonl: Option<String>,
 
     /// Optional CSV file to append assembly metrics (reserved for future use)
     #[arg(long)]
@@ -56,9 +56,9 @@ struct Args {
     #[arg(long)]
     score_gap: Option<f64>,
 
-    /// Output JSON file for alternative path analysis
+    /// Output NDJSON file (.jsonl) for alternative path analysis
     #[arg(long)]
-    alternatives_json: Option<String>,
+    alternatives_jsonl: Option<String>,
 
     /// Verbose/info output (default: quiet)
     #[arg(long, short = 'v', alias = "info")]
@@ -127,11 +127,11 @@ fn main() {
         args.output_fasta.as_deref(),
         args.reference.as_deref(),
         args.score_gap,
-        args.alternatives_json.as_deref(),
+        args.alternatives_jsonl.as_deref(),
         args.verbose,
         args.fasta_line_width,
         args.no_revcomp,
-        args.export_graph_json.as_deref(),
+        args.export_graph_jsonl.as_deref(),
         args.optimise_diagonal,
         args.threads,
         args.max_workers,
@@ -281,11 +281,11 @@ fn run_pipeline(
     output_fasta: Option<&str>,
     reference_path: Option<&str>,
     score_gap: Option<f64>,
-    alternatives_json: Option<&str>,
+    alternatives_jsonl: Option<&str>,
     verbose: bool,
     fasta_line_width: usize,
     no_revcomp: bool,
-    export_graph_json: Option<&str>,
+    export_graph_jsonl: Option<&str>,
     optimise_diagonal: bool,
     use_threads: bool,
     max_workers: usize,
@@ -313,7 +313,7 @@ fn run_pipeline(
     reads.extend(reads1.iter().cloned());
     reads.extend(reads2.iter().cloned());
 
-    // Export read map as JSON if requested
+    // Export read map as NDJSON if requested
     if let Some(json_path) = export_read_map {
         use serde_json::json;
         use std::io::Write;
@@ -322,34 +322,37 @@ fn run_pipeline(
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let read_map: Vec<_> = (0..reads.len())
-            .map(|idx| {
-                if idx < reads1_count {
-                    json!({
-                        "matrix_index": idx,
-                        "source": "reads1",
-                        "source_index": idx
-                    })
-                } else {
-                    json!({
-                        "matrix_index": idx,
-                        "source": "reads2",
-                        "source_index": idx - reads1_count
-                    })
-                }
-            })
-            .collect();
+        let mut file = std::fs::File::create(json_path)?;
+        // Write metadata as first line
         let metadata = json!({
+            "type": "metadata",
             "reads1_path": reads1_path,
             "reads2_path": reads2_path,
             "reads1_count": reads1_count,
             "reads2_count": reads2_count,
-            "reverse_complemented": !no_revcomp,
-            "read_map": read_map
+            "reverse_complemented": !no_revcomp
         });
-        let mut file = std::fs::File::create(json_path)?;
-        writeln!(file, "{}", serde_json::to_string_pretty(&metadata)?)?;
-        info!("Read map exported to {}", json_path);
+        writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
+        // Write each read as a separate line
+        for idx in 0..reads.len() {
+            let read_entry = if idx < reads1_count {
+                json!({
+                    "type": "read",
+                    "matrix_index": idx,
+                    "source": "reads1",
+                    "source_index": idx
+                })
+            } else {
+                json!({
+                    "type": "read",
+                    "matrix_index": idx,
+                    "source": "reads2",
+                    "source_index": idx - reads1_count
+                })
+            };
+            writeln!(file, "{}", serde_json::to_string(&read_entry)?)?;
+        }
+        info!("Read map exported to {} (NDJSON format)", json_path);
     }
 
     let config = OverlapConfig {
@@ -386,7 +389,7 @@ fn run_pipeline(
         );
     }
 
-    if let Some(graph_path) = export_graph_json {
+    if let Some(graph_path) = export_graph_jsonl {
         use serde_json::json;
         use std::io::Write;
         if let Some(parent) = std::path::Path::new(graph_path).parent() {
@@ -398,16 +401,27 @@ fn run_pipeline(
         for (idx, read) in reads.iter().enumerate() {
             nodes.push(json!({"id": idx, "sequence": read}));
         }
-        let mut edges = Vec::new();
+        let mut file = std::fs::File::create(graph_path)?;
+        // Write metadata as first line
+        let metadata = json!({"type": "metadata", "node_count": nodes.len()});
+        writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
+        // Write each node as a separate line
+        for node in nodes {
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&json!({"type": "node", "data": node}))?
+            )?;
+        }
+        // Write each edge as a separate line
         for (row_idx, row_vec) in adjacency_matrix.outer_iterator().enumerate() {
             for (col_idx, &weight) in row_vec.indices().iter().zip(row_vec.data().iter()) {
-                edges.push(json!({"source": row_idx, "target": col_idx, "weight": weight}));
+                let edge =
+                    json!({"type": "edge", "source": row_idx, "target": col_idx, "weight": weight});
+                writeln!(file, "{}", serde_json::to_string(&edge)?)?;
             }
         }
-        let graph_json = json!({"nodes": nodes, "edges": edges});
-        let mut file = std::fs::File::create(graph_path)?;
-        writeln!(file, "{}", serde_json::to_string_pretty(&graph_json)?)?;
-        info!("Assembly graph written to {}", graph_path);
+        info!("Assembly graph written to {} (NDJSON format)", graph_path);
     }
 
     let adjacency_csc = adjacency_matrix.to_csc();
@@ -421,8 +435,8 @@ fn run_pipeline(
     let assembled = find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
     debug!("[DEBUG] Assembly path: {:?}", assembled);
 
-    // Export combined alternatives JSON if requested (per-read successors + summary)
-    if let Some(json_path) = alternatives_json {
+    // Export combined alternatives JSONL if requested (per-read successors + summary)
+    if let Some(json_path) = alternatives_jsonl {
         use sequitur_rs::{analyse_alternatives, extract_read_alternatives};
         use serde_json::json;
         let analysis = analyse_alternatives(&adjacency_csc, score_gap);
@@ -451,14 +465,23 @@ fn run_pipeline(
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let combined = json!({
-            "summary": summary,
-            "per_read": per_read,
-        });
         let mut file = File::create(json_path)?;
-        writeln!(file, "{}", serde_json::to_string_pretty(&combined)?)?;
+        // Write summary as first line
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&json!({"type": "summary", "data": summary}))?
+        )?;
+        // Write each per_read entry as a separate line
+        for entry in per_read {
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&json!({"type": "per_read", "data": entry}))?
+            )?;
+        }
         info!(
-            "[ALT] Alternatives (summary + per_read) written to {}",
+            "[ALT] Alternatives (summary + per_read) written to {} (NDJSON format)",
             json_path
         );
     }
