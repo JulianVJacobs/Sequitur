@@ -1,5 +1,5 @@
 use env_logger;
-use log::{debug, info, warn};
+use log::{debug, info};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -50,9 +50,7 @@ struct Args {
     #[arg(long)]
     metrics_csv: Option<String>,
 
-    // Deprecated: alternatives are exported via --alternatives-json
-    // (previous --analyse-alternatives flag removed)
-    /// Maximum score gap for alternative paths (default: no filter)
+    /// Maximum score gap: prunes weak overlaps during graph construction and filters alternatives in output (default: no filter)
     #[arg(long)]
     score_gap: Option<f64>,
 
@@ -95,6 +93,10 @@ struct Args {
     /// Minimum suffix/overlap length to consider (filters tiny overlaps)
     #[arg(long, default_value_t = sequitur_rs::DEFAULT_MIN_SUFFIX_LEN)]
     min_suffix_len: usize,
+
+    /// Exponent for error penalty in quality-adjusted scoring (1.0=linear, 2.0=quadratic)
+    #[arg(long, default_value_t = 2.0)]
+    error_penalty_exponent: f32,
 }
 
 fn main() {
@@ -139,6 +141,7 @@ fn main() {
         args.max_diff,
         args.min_suffix_len,
         args.export_read_map.as_deref(),
+        args.error_penalty_exponent,
     ) {
         eprintln!("Assembly failed: {error:?}");
         std::process::exit(1);
@@ -293,6 +296,7 @@ fn run_pipeline(
     max_diff_cli: f32,
     min_suffix_len_cli: usize,
     export_read_map: Option<&str>,
+    error_penalty_exponent: f32,
 ) -> Result<String> {
     let reads1 = read_sequences(Path::new(reads1_path))
         .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
@@ -361,12 +365,20 @@ fn run_pipeline(
         use_trie: !use_array,
         max_diff: max_diff_cli,
         min_suffix_len: min_suffix_len_cli,
+        error_penalty_exponent,
+        score_gap_threshold: score_gap.map(|g| g as f32),
         ..OverlapConfig::default()
     };
     if config.use_trie {
         info!("Using pruned affix trie (unified path)");
     } else {
         info!("Using affix array (legacy path)");
+    }
+    if let Some(gap) = config.score_gap_threshold {
+        info!(
+            "Score-gap pruning enabled: removing overlaps more than {} below best per read",
+            gap
+        );
     }
     info!("Creating overlap graph (unified)...");
     let (mut adjacency_matrix, overlap_matrix) = create_overlap_graph_unified(&reads, config);
@@ -601,6 +613,7 @@ mod smoke {
             0.25,
             sequitur_rs::DEFAULT_MIN_SUFFIX_LEN,
             None, // export_read_map
+            2.0,  // error_penalty_exponent
         );
         assert!(res.is_ok());
     }

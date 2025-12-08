@@ -33,6 +33,10 @@ pub struct OverlapConfig {
     pub use_parabolic_cutoff: bool,
     /// Patience for parabolic early-out (consecutive increases before cutoff).
     pub parabolic_patience: usize,
+    /// Exponent for error penalty in quality-adjusted scoring (1.0=linear, 2.0=quadratic).
+    pub error_penalty_exponent: f32,
+    /// Maximum score gap from best overlap for pruning weak alternatives (None = no pruning).
+    pub score_gap_threshold: Option<f32>,
 }
 
 impl Default for OverlapConfig {
@@ -45,6 +49,8 @@ impl Default for OverlapConfig {
             use_trie: true, // Trie is the default (optimized implementation)
             use_parabolic_cutoff: true,
             parabolic_patience: 3,
+            error_penalty_exponent: 2.0, // Quadratic penalty by default
+            score_gap_threshold: None,   // No pruning by default
         }
     }
 }
@@ -261,7 +267,10 @@ pub fn verify_overlap_from_anchor(
         let float_diff = distance as f32 / span as f32;
 
         if float_diff < config.max_diff {
-            let score = (span as i32 - distance as i32) as f32;
+            // Quality-adjusted scoring: penalize errors based on error rate
+            let error_rate = distance as f32 / span as f32;
+            let quality_factor = (1.0 - error_rate).powf(config.error_penalty_exponent);
+            let score = span as f32 * quality_factor;
             if score > best_score || (score == best_score && span > best_overlap) {
                 best_score = score;
                 best_overlap = span;
@@ -404,7 +413,10 @@ fn create_overlap_graph_from_array<'a>(
                 if float_diff >= config.max_diff {
                     continue;
                 }
-                let score = overlap_len as i32 - int_edit_distance as i32;
+                // Quality-adjusted scoring: penalize errors based on error rate
+                let error_rate = int_edit_distance as f32 / overlap_len as f32;
+                let quality_factor = (1.0 - error_rate).powf(config.error_penalty_exponent);
+                let score = overlap_len as f32 * quality_factor;
                 for &dst in prefix_read_indices {
                     let prev_score = best_scores.get(&dst).copied().unwrap_or(f32::MIN);
                     let prev_span = best_spans.get(&dst).copied().unwrap_or(0);
@@ -423,6 +435,18 @@ fn create_overlap_graph_from_array<'a>(
         let mut o_idx = Vec::new();
         let mut o_dat = Vec::new();
         let mut pairs: Vec<(usize, f32)> = best_scores.into_iter().collect();
+
+        // Apply score-gap pruning if configured
+        if let Some(gap_threshold) = config.score_gap_threshold {
+            if !pairs.is_empty() {
+                let best_score = pairs
+                    .iter()
+                    .map(|(_, s)| s)
+                    .fold(f32::MIN, |a, &b| a.max(b));
+                pairs.retain(|(_, score)| best_score - score <= gap_threshold);
+            }
+        }
+
         pairs.sort_by_key(|(dst, _)| *dst);
         for (dst, score) in pairs.into_iter() {
             let overlap_len = best_spans.get(&dst).copied().unwrap_or(0);
