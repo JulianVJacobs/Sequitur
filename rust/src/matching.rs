@@ -200,7 +200,10 @@ pub fn find_first_subdiagonal_path(
             path
         }
         Err(e) => {
-            debug!("[DEBUG] lapjv error: {:?}", e);
+            log::info!(
+                "[LAPJV] Assignment failed: {:?}. Falling back to greedy assembly.",
+                e
+            );
             // Fallback to greedy path if assignment fails
             let csr = matrix.to_csr();
             let csc = matrix.to_csc();
@@ -536,7 +539,8 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(2));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let assembled = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, Some(&qualities));
+        let assembled =
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, Some(&qualities));
         assert_eq!(assembled, "ACGTAA");
     }
 
