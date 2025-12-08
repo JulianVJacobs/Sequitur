@@ -35,8 +35,8 @@ pub struct OverlapConfig {
     pub parabolic_patience: usize,
     /// Exponent for error penalty in quality-adjusted scoring (1.0=linear, 2.0=quadratic).
     pub error_penalty_exponent: f32,
-    /// Maximum score gap from best overlap for pruning weak alternatives (None = no pruning).
-    pub score_gap_threshold: Option<f32>,
+    /// Detect and remove low-quality overlaps using knee-point detection on score distribution.
+    pub detect_score_cliff: bool,
 }
 
 impl Default for OverlapConfig {
@@ -50,9 +50,45 @@ impl Default for OverlapConfig {
             use_parabolic_cutoff: true,
             parabolic_patience: 3,
             error_penalty_exponent: 2.0, // Quadratic penalty by default
-            score_gap_threshold: None,   // No pruning by default
+            detect_score_cliff: true,   // Knee detection enabled by default
         }
     }
+}
+
+/// Detect the knee (elbow) point in a sorted score distribution.
+/// Returns the index where scores drop dramatically, using the distance-from-line method.
+/// Scores should be sorted in descending order.
+fn detect_knee_point(scores: &[f32]) -> usize {
+    if scores.len() <= 2 {
+        return scores.len(); // No knee if too few points
+    }
+
+    let n = scores.len();
+    let start_score = scores[0];
+    let end_score = scores[n - 1];
+
+    // Handle edge case where all scores are the same
+    if (start_score - end_score).abs() < 1e-6 {
+        return n;
+    }
+
+    // Find point with maximum distance from line connecting first and last point
+    let mut max_distance = 0.0f32;
+    let mut knee_idx = n - 1;
+
+    for i in 1..n - 1 {
+        let score = scores[i];
+        // Point on line at rank i (linear interpolation)
+        let line_score = start_score + (end_score - start_score) * (i as f32 / (n - 1) as f32);
+        // Distance from actual score to line
+        let distance = (score - line_score).abs();
+        if distance > max_distance {
+            max_distance = distance;
+            knee_idx = i;
+        }
+    }
+
+    knee_idx
 }
 
 /// Compute the normalised Damerau–Levenshtein distance and overlap weight.
@@ -436,15 +472,14 @@ fn create_overlap_graph_from_array<'a>(
         let mut o_dat = Vec::new();
         let mut pairs: Vec<(usize, f32)> = best_scores.into_iter().collect();
 
-        // Apply score-gap pruning if configured
-        if let Some(gap_threshold) = config.score_gap_threshold {
-            if !pairs.is_empty() {
-                let best_score = pairs
-                    .iter()
-                    .map(|(_, s)| s)
-                    .fold(f32::MIN, |a, &b| a.max(b));
-                pairs.retain(|(_, score)| best_score - score <= gap_threshold);
-            }
+        // Apply knee-point detection if configured
+        if config.detect_score_cliff && !pairs.is_empty() {
+            // Sort by score descending to detect the cliff
+            pairs.sort_by(|(_, s1), (_, s2)| s2.partial_cmp(s1).unwrap());
+            let scores: Vec<f32> = pairs.iter().map(|(_, s)| *s).collect();
+            let knee_idx = detect_knee_point(&scores);
+            // Truncate to keep only overlaps up to and including the knee point
+            pairs.truncate(knee_idx + 1);
         }
 
         pairs.sort_by_key(|(dst, _)| *dst);

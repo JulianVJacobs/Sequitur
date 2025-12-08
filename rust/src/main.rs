@@ -50,9 +50,9 @@ struct Args {
     #[arg(long)]
     metrics_csv: Option<String>,
 
-    /// Maximum score gap: prunes weak overlaps during graph construction and filters alternatives in output (default: no filter)
-    #[arg(long)]
-    score_gap: Option<f64>,
+    /// Detect and remove low-quality overlaps by finding the cliff (knee) in score distribution (default: true)
+    #[arg(long, default_value_t = true)]
+    detect_score_cliff: bool,
 
     /// Output NDJSON file (.jsonl) for alternative path analysis
     #[arg(long)]
@@ -128,7 +128,7 @@ fn main() {
         &args.reads2,
         args.output_fasta.as_deref(),
         args.reference.as_deref(),
-        args.score_gap,
+        args.detect_score_cliff,
         args.alternatives_jsonl.as_deref(),
         args.verbose,
         args.fasta_line_width,
@@ -283,7 +283,7 @@ fn run_pipeline(
     reads2_path: &str,
     output_fasta: Option<&str>,
     reference_path: Option<&str>,
-    score_gap: Option<f64>,
+    detect_score_cliff: bool,
     alternatives_jsonl: Option<&str>,
     verbose: bool,
     fasta_line_width: usize,
@@ -366,7 +366,7 @@ fn run_pipeline(
         max_diff: max_diff_cli,
         min_suffix_len: min_suffix_len_cli,
         error_penalty_exponent,
-        score_gap_threshold: score_gap.map(|g| g as f32),
+        detect_score_cliff,
         ..OverlapConfig::default()
     };
     if config.use_trie {
@@ -374,11 +374,8 @@ fn run_pipeline(
     } else {
         info!("Using affix array (legacy path)");
     }
-    if let Some(gap) = config.score_gap_threshold {
-        info!(
-            "Score-gap pruning enabled: removing overlaps more than {} below best per read",
-            gap
-        );
+    if config.detect_score_cliff {
+        info!("Score-cliff detection enabled: will remove low-quality overlaps using knee-point analysis");
     }
     info!("Creating overlap graph (unified)...");
     let (mut adjacency_matrix, overlap_matrix) = create_overlap_graph_unified(&reads, config);
@@ -451,7 +448,7 @@ fn run_pipeline(
     if let Some(json_path) = alternatives_jsonl {
         use sequitur_rs::{analyse_alternatives, extract_read_alternatives};
         use serde_json::json;
-        let analysis = analyse_alternatives(&adjacency_csc, score_gap);
+        let analysis = analyse_alternatives(&adjacency_csc, None);
         info!("[ALT] Swap squares detected: {}", analysis.squares.len());
         info!(
             "[ALT] Components: {} ({} cycles, {} chains)",
@@ -600,7 +597,7 @@ mod smoke {
             tmp2.path().to_str().unwrap(),
             None,
             None,
-            None,
+            true, // detect_score_cliff
             None,
             false,
             60,
