@@ -50,7 +50,7 @@ impl Default for OverlapConfig {
             use_parabolic_cutoff: true,
             parabolic_patience: 3,
             error_penalty_exponent: 2.0, // Quadratic penalty by default
-            detect_score_cliff: true,   // Knee detection enabled by default
+            detect_score_cliff: true,    // Knee detection enabled by default
         }
     }
 }
@@ -59,8 +59,12 @@ impl Default for OverlapConfig {
 /// Returns the index where scores drop dramatically, using the distance-from-line method.
 /// Scores should be sorted in descending order.
 fn detect_knee_point(scores: &[f32]) -> usize {
-    if scores.len() <= 2 {
-        return scores.len(); // No knee if too few points
+    if scores.is_empty() {
+        return 0;
+    }
+
+    if scores.len() == 1 {
+        return 0; // Only one score, no knee
     }
 
     let n = scores.len();
@@ -69,7 +73,17 @@ fn detect_knee_point(scores: &[f32]) -> usize {
 
     // Handle edge case where all scores are the same
     if (start_score - end_score).abs() < 1e-6 {
-        return n;
+        return n - 1; // Linear, keep all points
+    }
+
+    // For just 2 points, check if drop is dramatic (>50% reduction)
+    if n == 2 {
+        let ratio = scores[1] / scores[0];
+        if ratio < 0.5 {
+            return 0; // Keep only the first (highest) score
+        } else {
+            return 1; // Keep both
+        }
     }
 
     // Find point with maximum distance from line connecting first and last point
@@ -246,6 +260,17 @@ fn create_overlap_graph_from_trie(
                 }
             })
             .collect();
+
+        // Apply knee-point detection if configured
+        if config.detect_score_cliff && !edges.is_empty() {
+            // Sort by score descending to detect the cliff
+            edges.sort_by(|(_, s1), (_, s2)| s2.partial_cmp(s1).unwrap());
+            let scores: Vec<f32> = edges.iter().map(|(_, s)| *s).collect();
+            let knee_idx = detect_knee_point(&scores);
+            // Truncate to keep only overlaps up to and including the knee point
+            edges.truncate(knee_idx + 1);
+        }
+
         edges.sort_by_key(|(dst, _)| *dst);
 
         for (dst, score) in edges {
