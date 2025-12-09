@@ -346,8 +346,10 @@ mod tests {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReadAlternative {
     pub target: usize,
-    pub score: usize,
     pub overlap_length: usize,
+    pub score: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_score: Option<f32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -375,8 +377,9 @@ pub fn extract_read_alternatives(
             let overlap_length = ovl_row.get(target).copied().unwrap_or(0);
             successors.push(ReadAlternative {
                 target,
-                score,
                 overlap_length,
+                score,
+                quality_score: None,
             });
         }
 
@@ -386,6 +389,14 @@ pub fn extract_read_alternatives(
                 .cmp(&a.score)
                 .then_with(|| b.overlap_length.cmp(&a.overlap_length))
         });
+
+        // Calculate normalized quality scores (0.0-1.0) relative to best score
+        if let Some(&best_score) = successors.first().map(|s| &s.score) {
+            let best_f = best_score as f32;
+            for successor in &mut successors {
+                successor.quality_score = Some(successor.score as f32 / best_f);
+            }
+        }
 
         if !successors.is_empty() {
             results.push(ReadAlternatives {
