@@ -464,6 +464,7 @@ fn run_pipeline(
         find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
     debug!("[DEBUG] Assembly sequence length: {}", assembled.len());
     debug!("[DEBUG] Assembly path order: {:?}", assembly_path);
+    info!("[DEBUG] Assembly path order: {:?}", assembly_path);
 
     // Export combined alternatives JSONL if requested (per-read successors with assembly order)
     if let Some(json_path) = alternatives_jsonl {
