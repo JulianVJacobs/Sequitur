@@ -120,7 +120,7 @@ pub fn find_first_subdiagonal_path(
             } else if score == 0.0 {
                 f64::INFINITY
             } else {
-                score
+                -score
             };
         }
     }
@@ -183,6 +183,7 @@ pub fn find_first_subdiagonal_path(
                     path.push(i);
                 }
             }
+            // debug!(
             info!(
                 "[DEBUG] lapjv Assignment reconstructed path (indices): {:?}",
                 path
