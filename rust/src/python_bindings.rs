@@ -69,7 +69,7 @@ fn assemble_from_reads(
     let overlap_csc = overlap_matrix.to_csc();
 
     // Call assembler (qualities not provided)
-    let seq = find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
+    let (seq, _path) = find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
 
     Ok(AssemblyResult::new(seq))
 }

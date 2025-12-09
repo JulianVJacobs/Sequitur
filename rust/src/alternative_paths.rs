@@ -345,16 +345,16 @@ mod tests {
 /// Per-read alternative paths structure for JSON export.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReadAlternative {
-    pub target: usize,
+    pub target_id: String,
     pub overlap_length: usize,
     pub quality_adjusted_score: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chosen: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReadAlternatives {
-    pub read_index: usize,
+    pub read_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assembly_order: Option<usize>,
     pub successors: Vec<ReadAlternative>,
 }
 
@@ -365,8 +365,19 @@ pub struct ReadAlternatives {
 pub fn extract_read_alternatives(
     adjacency: &CsMat<usize>,
     overlap: &CsMat<usize>,
+    read_ids: &[String],
+    assembly_path: Option<&[usize]>,
 ) -> Vec<ReadAlternatives> {
     let mut results = Vec::new();
+
+    // Build reverse index: read_idx -> position in assembly path
+    let assembly_order_map: Option<std::collections::HashMap<usize, usize>> =
+        assembly_path.map(|path| {
+            path.iter()
+                .enumerate()
+                .map(|(order, &read_idx)| (read_idx, order))
+                .collect()
+        });
 
     for (read_idx, adj_row) in adjacency.outer_iterator().enumerate() {
         let ovl_row = overlap.outer_view(read_idx).unwrap();
@@ -376,10 +387,9 @@ pub fn extract_read_alternatives(
         for (target, &score) in adj_row.iter() {
             let overlap_length = ovl_row.get(target).copied().unwrap_or(0);
             successors.push(ReadAlternative {
-                target,
+                target_id: read_ids[target].clone(),
                 overlap_length,
                 quality_adjusted_score: score as f32,
-                chosen: None,
             });
         }
 
@@ -391,17 +401,15 @@ pub fn extract_read_alternatives(
                 .then_with(|| b.overlap_length.cmp(&a.overlap_length))
         });
 
-        // Mark the first (best) successor as implicitly chosen if only one path exists
-        if successors.len() == 1 {
-            successors[0].chosen = Some(true);
-        }
+        let assembly_order = assembly_order_map
+            .as_ref()
+            .and_then(|map| map.get(&read_idx).copied());
 
-        if !successors.is_empty() {
-            results.push(ReadAlternatives {
-                read_index: read_idx,
-                successors,
-            });
-        }
+        results.push(ReadAlternatives {
+            read_id: read_ids[read_idx].clone(),
+            assembly_order,
+            successors,
+        });
     }
 
     results

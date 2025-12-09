@@ -204,7 +204,7 @@ fn uppercase_sequence(bytes: &[u8]) -> Result<String> {
     String::from_utf8(upper).map_err(|_| anyhow!("Encountered non-UTF-8 symbols in sequence data"))
 }
 
-fn read_sequences(path: &Path) -> Result<Vec<String>> {
+fn read_sequences(path: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let format = infer_format(path);
     let reader = open_reader(path)?;
 
@@ -212,30 +212,38 @@ fn read_sequences(path: &Path) -> Result<Vec<String>> {
         SequenceFormat::Fastq => {
             let fastq_reader = fastq::Reader::new(reader);
             let mut sequences = Vec::new();
+            let mut read_ids = Vec::new();
             for record in fastq_reader.records() {
                 let record = record.with_context(|| {
                     format!("Error reading FASTQ record from {}", path.display())
                 })?;
                 let seq = uppercase_sequence(record.seq())?;
+                let id = record.id().to_string();
                 sequences.push(seq);
+                read_ids.push(id);
             }
-            Ok(sequences)
+            Ok((sequences, read_ids))
         }
         SequenceFormat::Fasta => {
             let fasta_reader = fasta::Reader::new(reader);
             let mut sequences = Vec::new();
+            let mut read_ids = Vec::new();
             for record in fasta_reader.records() {
                 let record = record.with_context(|| {
                     format!("Error reading FASTA record from {}", path.display())
                 })?;
                 let seq = uppercase_sequence(record.seq())?;
+                let id = record.id().to_string();
                 sequences.push(seq);
+                read_ids.push(id);
             }
-            Ok(sequences)
+            Ok((sequences, read_ids))
         }
         SequenceFormat::Lines => {
             let mut sequences = Vec::new();
+            let mut read_ids = Vec::new();
             let mut buf_reader = reader;
+            let mut idx = 0;
             loop {
                 let mut line = String::new();
                 let bytes = buf_reader.read_line(&mut line)?;
@@ -247,8 +255,10 @@ fn read_sequences(path: &Path) -> Result<Vec<String>> {
                     continue;
                 }
                 sequences.push(trimmed.to_ascii_uppercase());
+                read_ids.push(format!("line_{}", idx));
+                idx += 1;
             }
-            Ok(sequences)
+            Ok((sequences, read_ids))
         }
     }
 }
@@ -267,7 +277,7 @@ fn load_reference(path: &Path) -> Result<Option<String>> {
     if !path.exists() {
         bail!("Reference path {} does not exist", path.display());
     }
-    let sequences = read_sequences(path)?;
+    let (sequences, _read_ids) = read_sequences(path)?;
     if sequences.is_empty() {
         return Ok(None);
     }
@@ -298,9 +308,9 @@ fn run_pipeline(
     export_read_map: Option<&str>,
     error_penalty_exponent: f32,
 ) -> Result<String> {
-    let reads1 = read_sequences(Path::new(reads1_path))
+    let (reads1, reads1_ids) = read_sequences(Path::new(reads1_path))
         .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
-    let reads2_raw = read_sequences(Path::new(reads2_path))
+    let (reads2_raw, reads2_ids_raw) = read_sequences(Path::new(reads2_path))
         .with_context(|| format!("Failed to parse reads from {}", reads2_path))?;
 
     let reads2 = if no_revcomp {
@@ -311,11 +321,20 @@ fn run_pipeline(
         reverse_complement_all(reads2_raw)?
     };
 
+    // Combine read IDs with source annotation (only add /RC if actually reverse-complemented)
+    let reads2_ids: Vec<String> = reads2_ids_raw
+        .into_iter()
+        .map(|id| if no_revcomp { id } else { format!("{}/RC", id) })
+        .collect();
+
     let reads1_count = reads1.len();
     let reads2_count = reads2.len();
     let mut reads = Vec::with_capacity(reads1_count + reads2_count);
+    let mut read_ids = Vec::with_capacity(reads1_count + reads2_count);
     reads.extend(reads1.iter().cloned());
     reads.extend(reads2.iter().cloned());
+    read_ids.extend(reads1_ids.iter().cloned());
+    read_ids.extend(reads2_ids.iter().cloned());
 
     // Export read map as NDJSON if requested
     if let Some(json_path) = export_read_map {
@@ -441,47 +460,30 @@ fn run_pipeline(
         adjacency_csc.nnz()
     );
 
-    let assembled = find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
-    debug!("[DEBUG] Assembly path: {:?}", assembled);
+    let (assembled, assembly_path) =
+        find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
+    debug!("[DEBUG] Assembly sequence length: {}", assembled.len());
+    debug!("[DEBUG] Assembly path order: {:?}", assembly_path);
 
-    // Export combined alternatives JSONL if requested (per-read successors + summary)
+    // Export combined alternatives JSONL if requested (per-read successors with assembly order)
     if let Some(json_path) = alternatives_jsonl {
-        use sequitur_rs::{analyse_alternatives, extract_read_alternatives};
+        use sequitur_rs::extract_read_alternatives;
         use serde_json::json;
-        let analysis = analyse_alternatives(&adjacency_csc, None);
-        info!("[ALT] Swap squares detected: {}", analysis.squares.len());
-        info!(
-            "[ALT] Components: {} ({} cycles, {} chains)",
-            analysis.components.len(),
-            analysis.cycles.len(),
-            analysis.chains.len()
+
+        let per_read = extract_read_alternatives(
+            &adjacency_matrix,
+            &overlap_matrix,
+            &read_ids,
+            Some(&assembly_path),
         );
-        let squares_json: Vec<_> = analysis
-            .squares
-            .iter()
-            .map(|sq| json!({"i": sq.i, "j": sq.j, "delta": sq.delta}))
-            .collect();
-        let summary = json!({
-            "squares": squares_json,
-            "components": analysis.components,
-            "cycles": analysis.cycles,
-            "chains": analysis.chains,
-            "ambiguity_count": analysis.ambiguity_count,
-        });
-        let per_read = extract_read_alternatives(&adjacency_matrix, &overlap_matrix);
         if let Some(parent) = Path::new(json_path).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
             }
         }
         let mut file = File::create(json_path)?;
-        // Write summary as first line
-        writeln!(
-            file,
-            "{}",
-            serde_json::to_string(&json!({"type": "summary", "data": summary}))?
-        )?;
-        // Write each per_read entry as a separate line
+
+        // Write each per_read entry as a separate line (now includes assembly_order field)
         for entry in per_read {
             writeln!(
                 file,
@@ -490,7 +492,7 @@ fn run_pipeline(
             )?;
         }
         info!(
-            "[ALT] Alternatives (summary + per_read) written to {} (NDJSON format)",
+            "[ALT] Alternatives with assembly order written to {} (NDJSON format)",
             json_path
         );
     }
