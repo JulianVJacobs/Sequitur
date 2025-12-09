@@ -107,14 +107,14 @@ pub fn find_first_subdiagonal_path(
     reads: &[String],
     _qualities: Option<&[Vec<i32>]>,
 ) -> String {
-    // Build cost matrix from real overlaps
+    // Build cost matrix from quality-adjusted scores in adjacency matrix
     use ndarray::Array2;
-    let n = overlap_csc.rows();
+    let n = matrix.rows();
     let mut cost_matrix = Array2::<f64>::zeros((n, n));
     for i in 0..n {
         for j in 0..n {
-            // Use actual overlap length, or set forbidden value if no overlap
-            let score = overlap_csc.get(i, j).copied().unwrap_or(0) as f64;
+            // Use quality-adjusted score from adjacency matrix (has error penalty applied)
+            let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
             cost_matrix[(i, j)] = if i == j {
                 reads[i].len() as f64
             } else if score == 0.0 {

@@ -347,9 +347,9 @@ mod tests {
 pub struct ReadAlternative {
     pub target: usize,
     pub overlap_length: usize,
-    pub score: usize,
+    pub quality_adjusted_score: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub quality_score: Option<f32>,
+    pub chosen: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -378,24 +378,22 @@ pub fn extract_read_alternatives(
             successors.push(ReadAlternative {
                 target,
                 overlap_length,
-                score,
-                quality_score: None,
+                quality_adjusted_score: score as f32,
+                chosen: None,
             });
         }
 
-        // Sort by score descending, then by overlap length descending
+        // Sort by quality_adjusted_score descending, then by overlap length descending
         successors.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
+            b.quality_adjusted_score
+                .partial_cmp(&a.quality_adjusted_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| b.overlap_length.cmp(&a.overlap_length))
         });
 
-        // Calculate normalized quality scores (0.0-1.0) relative to best score
-        if let Some(&best_score) = successors.first().map(|s| &s.score) {
-            let best_f = best_score as f32;
-            for successor in &mut successors {
-                successor.quality_score = Some(successor.score as f32 / best_f);
-            }
+        // Mark the first (best) successor as implicitly chosen if only one path exists
+        if successors.len() == 1 {
+            successors[0].chosen = Some(true);
         }
 
         if !successors.is_empty() {
