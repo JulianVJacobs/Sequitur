@@ -12,7 +12,7 @@ use sprs::{indexing::SpIndex, CsMat, TriMat};
 use lapjv::lapjv;
 
 use crate::overlap::Adjacency;
-use log::debug;
+use log::{debug, info};
 
 // Removed duplicate private argmin_index
 pub fn argmin_index(values: &[usize]) -> Option<usize> {
@@ -183,7 +183,7 @@ pub fn find_first_subdiagonal_path(
                     path.push(i);
                 }
             }
-            debug!(
+            info!(
                 "[DEBUG] lapjv Assignment reconstructed path (indices): {:?}",
                 path
             );
