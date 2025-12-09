@@ -120,7 +120,7 @@ pub fn find_first_subdiagonal_path(
             } else if score == 0.0 {
                 f64::INFINITY
             } else {
-                -score
+                score
             };
         }
     }
