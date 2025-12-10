@@ -223,6 +223,7 @@ fn bench_matching_assembly(c: &mut Criterion) {
         let (adj_matrix, ovl_matrix) = create_overlap_graph_unified(&reads, config);
         let adj_csc = adj_matrix.to_csc();
         let ovl_csc = ovl_matrix.to_csc();
+        let read_ids: Vec<String> = (0..reads.len()).map(|i| format!("read{}", i)).collect();
 
         group.bench_with_input(BenchmarkId::new("path_finding", n), &reads, |b, reads| {
             b.iter(|| {
@@ -230,6 +231,7 @@ fn bench_matching_assembly(c: &mut Criterion) {
                     black_box(&adj_csc),
                     black_box(&ovl_csc),
                     black_box(reads),
+                    black_box(&read_ids),
                     None,
                 )
             });
@@ -255,7 +257,8 @@ fn bench_end_to_end(c: &mut Criterion) {
                     create_overlap_graph_unified(black_box(reads), config);
                 let adj_csc = adj_matrix.to_csc();
                 let ovl_csc = ovl_matrix.to_csc();
-                find_first_subdiagonal_path(&adj_csc, &ovl_csc, reads, None)
+                let read_ids: Vec<String> = (0..reads.len()).map(|i| format!("read{}", i)).collect();
+                find_first_subdiagonal_path(&adj_csc, &ovl_csc, reads, &read_ids, None)
             });
         });
     }

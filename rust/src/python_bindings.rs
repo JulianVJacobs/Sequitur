@@ -68,8 +68,12 @@ fn assemble_from_reads(
     let adjacency_csc = adjacency_matrix.to_csc();
     let overlap_csc = overlap_matrix.to_csc();
 
+    // Generate read IDs (use indices for Python bindings)
+    let read_ids: Vec<String> = (0..reads.len()).map(|i| format!("read{}", i)).collect();
+
     // Call assembler (qualities not provided)
-    let (seq, _path) = find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
+    let (seq, _path) =
+        find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, &read_ids, None);
 
     Ok(AssemblyResult::new(seq))
 }

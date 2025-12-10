@@ -170,6 +170,16 @@ fn create_overlap_graph_from_trie(
     let candidates = affix_trie.overlap_candidates(reads);
     log::info!("Found {} candidate pairs", candidates.len());
 
+    // Debug: log all candidates
+    for (suffix_idx, prefix_idx, shared_affix) in &candidates {
+        log::debug!(
+            "[CANDIDATE] {} -> {} (shared_affix: '{}')",
+            suffix_idx,
+            prefix_idx,
+            shared_affix
+        );
+    }
+
     // Build best scores and spans for each read pair
     log::info!("Verifying {} candidates...", candidates.len());
     #[cfg(feature = "parallel")]
@@ -222,6 +232,13 @@ fn create_overlap_graph_from_trie(
             let suffix_read = &reads[*suffix_idx];
             let prefix_read = &reads[*prefix_idx];
 
+            log::debug!(
+                "[VERIFY] Candidate {} -> {} (anchor: {})",
+                suffix_idx,
+                prefix_idx,
+                shared_affix
+            );
+
             if let Some((score, overlap_len)) =
                 verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config)
             {
@@ -229,10 +246,24 @@ fn create_overlap_graph_from_trie(
                 let prev_score = best_scores.get(&key).copied().unwrap_or(f32::MIN);
                 let prev_span = best_spans.get(&key).copied().unwrap_or(0);
 
+                log::debug!(
+                    "[VERIFY] ✓ {} -> {}: score={:.2}, overlap_len={}",
+                    suffix_idx,
+                    prefix_idx,
+                    score,
+                    overlap_len
+                );
+
                 if score > prev_score || (score == prev_score && overlap_len > prev_span) {
                     best_scores.insert(key, score);
                     best_spans.insert(key, overlap_len);
                 }
+            } else {
+                log::debug!(
+                    "[VERIFY] ✗ {} -> {}: rejected (max_diff or min_suffix_len)",
+                    suffix_idx,
+                    prefix_idx
+                );
             }
         }
         (best_scores, best_spans)
@@ -261,14 +292,34 @@ fn create_overlap_graph_from_trie(
             })
             .collect();
 
+        let edges_before = edges.len();
+
         // Apply knee-point detection if configured
         if config.detect_score_cliff && !edges.is_empty() {
             // Sort by score descending to detect the cliff
             edges.sort_by(|(_, s1), (_, s2)| s2.partial_cmp(s1).unwrap());
             let scores: Vec<f32> = edges.iter().map(|(_, s)| *s).collect();
             let knee_idx = detect_knee_point(&scores);
+
+            log::debug!(
+                "[SCORE_CLIFF] Row {}: {} edges before, knee at index {}, keeping {} edges",
+                src_idx,
+                edges_before,
+                knee_idx,
+                knee_idx + 1
+            );
+            log::debug!("[SCORE_CLIFF] Row {} scores: {:?}", src_idx, scores);
+
             // Truncate to keep only overlaps up to and including the knee point
             edges.truncate(knee_idx + 1);
+
+            if edges.len() < edges_before {
+                log::debug!(
+                    "[SCORE_CLIFF] Row {}: removed {} edges due to score cliff",
+                    src_idx,
+                    edges_before - edges.len()
+                );
+            }
         }
 
         edges.sort_by_key(|(dst, _)| *dst);

@@ -12,7 +12,7 @@ use sprs::{indexing::SpIndex, CsMat, TriMat};
 use lapjv::lapjv;
 
 use crate::overlap::Adjacency;
-use log::{debug, info};
+use log::debug;
 
 // Removed duplicate private argmin_index
 pub fn argmin_index(values: &[usize]) -> Option<usize> {
@@ -100,11 +100,44 @@ pub fn relabel_rows(matrix: &mut TriMat<usize>, rows_map: &HashMap<usize, usize>
     *matrix = updated;
 }
 
+/// Validate that every edge in the assembly path exists in the cost matrix.
+fn validate_assembly_path(
+    path: &[usize],
+    cost_matrix: &ndarray::Array2<f64>,
+    read_ids: &[String],
+) -> Option<String> {
+    for i in 0..path.len() - 1 {
+        let from = path[i];
+        let to = path[i + 1];
+        let cost = cost_matrix[(from, to)];
+
+        if cost.is_infinite() {
+            return Some(format!(
+                "INVALID: path contains edge {} -> {} ({} -> {}) with cost INF",
+                from,
+                to,
+                if from < read_ids.len() {
+                    &read_ids[from]
+                } else {
+                    "OOB"
+                },
+                if to < read_ids.len() {
+                    &read_ids[to]
+                } else {
+                    "OOB"
+                }
+            ));
+        }
+    }
+    None
+}
+
 /// Placeholder for the subdiagonal traversal; not yet ported from Python.
 pub fn find_first_subdiagonal_path(
     matrix: &CsMat<usize>,
     overlap_csc: &CsMat<usize>,
     reads: &[String],
+    read_ids: &[String],
     _qualities: Option<&[Vec<i32>]>,
 ) -> (String, Vec<usize>) {
     // Build cost matrix from quality-adjusted scores in adjacency matrix
@@ -115,29 +148,15 @@ pub fn find_first_subdiagonal_path(
         for j in 0..n {
             // Use quality-adjusted score from adjacency matrix (has error penalty applied)
             let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
-            cost_matrix[(i, j)] = if i == j {
-                reads[i].len() as f64
-            } else if score == 0.0 {
-                f64::INFINITY
-            } else {
-                -score
-            };
+            cost_matrix[(i, j)] = -score
         }
     }
-    debug!("[DEBUG] Cost matrix for lapjv assignment (row-major):");
+    debug!("[DEBUG] Cost matrix for lapjv assignment:");
     for i in 0..n {
         let row: Vec<f64> = (0..n).map(|j| cost_matrix[(i, j)]).collect();
         debug!("  row {}: {:?}", i, row);
     }
-    // Use lapjv for assignment
-    // Transpose cost matrix for col-major assignment
-    let cost_matrix_t = cost_matrix.t().to_owned();
-    debug!("[DEBUG] Cost matrix for lapjv assignment (col-major, transposed):");
-    for i in 0..n {
-        let row: Vec<f64> = (0..n).map(|j| cost_matrix_t[(i, j)]).collect();
-        debug!("  row {}: {:?}", i, row);
-    }
-    let path = match lapjv(&cost_matrix_t) {
+    let path = match lapjv(&cost_matrix) {
         Ok((assignment_vec, col_assignments)) => {
             debug!("[DEBUG] lapjv Assignment vector: {:?}", assignment_vec);
             debug!("[DEBUG] lapjv Col assignments: {:?}", col_assignments);
@@ -165,6 +184,7 @@ pub fn find_first_subdiagonal_path(
                 Some(idx) if idx < n => idx,
                 _ => 0,
             };
+            // Walk the primary component starting from the chosen start
             for _ in 0..n {
                 if assigned[current] {
                     break;
@@ -177,17 +197,33 @@ pub fn find_first_subdiagonal_path(
                 }
                 current = next;
             }
-            // Add any unvisited nodes
-            for i in 0..n {
-                if !assigned[i] {
-                    path.push(i);
+
+            // Walk any remaining components separately to avoid fabricating edges
+            while assigned.iter().any(|&v| !v) {
+                // pick the lowest-index unvisited node as a new component start
+                let next_start = assigned.iter().position(|&v| !v).unwrap_or(0);
+                let mut current = next_start;
+                for _ in 0..n {
+                    if assigned[current] {
+                        break;
+                    }
+                    path.push(current);
+                    assigned[current] = true;
+                    let next = assignment_vec[current];
+                    if assigned[next] {
+                        break;
+                    }
+                    current = next;
                 }
             }
-            // debug!(
-            info!(
+            debug!(
                 "[DEBUG] lapjv Assignment reconstructed path (indices): {:?}",
                 path
             );
+            // Validate path against cost matrix
+            if let Some(violation) = validate_assembly_path(&path, &cost_matrix, read_ids) {
+                log::warn!("[PATH_VALIDATION] {}", violation);
+            }
             debug!("[DEBUG] Overlap scores along lapjv assignment path:");
             let mut total_weight = 0;
             for w in path.windows(2) {
@@ -523,10 +559,12 @@ mod tests {
         overlaps[0].insert(1, 2);
 
         let reads = vec!["ACGT".to_string(), "GTAA".to_string()];
+        let read_ids = vec!["read0".to_string(), "read1".to_string()];
         let matrix = adjacency_to_csc(&adjacency, Some(2));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
+        let (assembled, _path) =
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
         assert_eq!(assembled, "ACGTAA");
     }
 
@@ -538,12 +576,13 @@ mod tests {
         overlaps[0].insert(1, 2);
 
         let reads = vec!["ACGT".to_string(), "GTAA".to_string()];
+        let read_ids = vec!["read0".to_string(), "read1".to_string()];
         let qualities = vec![vec![10, 10, 5, 5], vec![5, 5, 30, 30]];
         let matrix = adjacency_to_csc(&adjacency, Some(2));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
         let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, Some(&qualities));
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, Some(&qualities));
         assert_eq!(assembled, "ACGTAA");
     }
 
@@ -568,11 +607,17 @@ mod tests {
             "BBBBCCCC".to_string(),
             "BBBBDDDD".to_string(),
         ];
+        let read_ids = vec![
+            "read0".to_string(),
+            "read1".to_string(),
+            "read2".to_string(),
+        ];
         let matrix = adjacency_to_csc(&adjacency, Some(3));
         let overlap_csc = overlaps_to_csc(&overlaps);
 
         // With swap-square guard, both orders should be acceptable
-        let (assembled, _path) = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
+        let (assembled, _path) =
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
         // Result should be valid (either A→B→C or A→C→B path)
         assert!(assembled.starts_with("AAAA"));
         assert!(assembled.len() >= 12); // At least 3 reads worth
@@ -600,10 +645,17 @@ mod tests {
             "AAAADDDD".to_string(),
             "CCCCEEEE".to_string(),
         ];
+        let read_ids = vec![
+            "read0".to_string(),
+            "read1".to_string(),
+            "read2".to_string(),
+            "read3".to_string(),
+        ];
         let matrix = adjacency_to_csc(&adjacency, Some(4));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
+        let (assembled, _path) =
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
         // Should follow valid forward path: A→B→D, then append C
         assert!(assembled.len() > 0);
     }
@@ -629,10 +681,17 @@ mod tests {
             "BBBBDDDD".to_string(),
             "BBBBEEEE".to_string(),
         ];
+        let read_ids = vec![
+            "read0".to_string(),
+            "read1".to_string(),
+            "read2".to_string(),
+            "read3".to_string(),
+        ];
         let matrix = adjacency_to_csc(&adjacency, Some(4));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
+        let (assembled, _path) =
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
         // With overlaps, total length will be: 8 + (8-3) + (8-3) + (8-3) = 8+5+5+5 = 23
         // But actual behavior depends on path order
         assert!(assembled.len() >= 8); // At least one read
@@ -656,10 +715,16 @@ mod tests {
             "BBBBCCCC".to_string(),
             "CCCCDDDD".to_string(),
         ];
+        let read_ids = vec![
+            "read0".to_string(),
+            "read1".to_string(),
+            "read2".to_string(),
+        ];
         let matrix = adjacency_to_csc(&adjacency, Some(3));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, None);
+        let (assembled, _path) =
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
         // With overlap=3: 8 + (8-3) + (8-3) = 8+5+5 = 18
         // But overlap includes overlapping bases, so: "AAAABBBB" + "BCCCC" + "CDDDD" = "AAAABBBBBCCCCCDDDD" (19 chars)
         assert_eq!(assembled.len(), 18); // Correct accounting for overlaps

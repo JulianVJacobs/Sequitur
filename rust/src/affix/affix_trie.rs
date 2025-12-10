@@ -288,6 +288,31 @@ impl PrunedAffixTrie {
             trie.roots.len()
         );
 
+        // Debug: dump all nodes before pruning
+        log::debug!("[TRIE_PHASE1] Nodes before pruning:");
+        for (key, node) in trie.nodes.iter() {
+            let affix_str = &reads[key.0][key.1..key.2];
+            let node_type = match node {
+                AffixNode::Delta { .. } => "Delta",
+                AffixNode::Leaf => "Leaf",
+                AffixNode::Chain { .. } => "Chain",
+            };
+            let contributors = trie
+                .affix_contributors
+                .get(affix_str)
+                .map(|s| s.len())
+                .unwrap_or(0);
+            log::debug!(
+                "  [{}, {}..{}] '{}' {} (contributors: {})",
+                key.0,
+                key.1,
+                key.2,
+                affix_str,
+                node_type,
+                contributors
+            );
+        }
+
         // Phase 2: Prune nodes without cross-read connections
         // Retain:
         // - Delta nodes (branching points and full reads)
@@ -309,7 +334,13 @@ impl PrunedAffixTrie {
                                 .get(affix_str)
                                 .map_or(false, |set| set.len() > 1)
                         }
-                        AffixNode::Chain { .. } => Self::has_cross_read_link(key, node),
+                        AffixNode::Chain { .. } => {
+                            // Keep if affix appears in multiple reads (same as Leaf)
+                            let affix_str = &reads[key.0][key.1..key.2];
+                            trie.affix_contributors
+                                .get(affix_str)
+                                .map_or(false, |set| set.len() > 1)
+                        }
                     };
                     if should_keep {
                         None
@@ -334,10 +365,41 @@ impl PrunedAffixTrie {
                     .get(affix_str)
                     .map_or(false, |set| set.len() > 1)
             }
-            AffixNode::Chain { .. } => Self::has_cross_read_link(key, node),
+            AffixNode::Chain { .. } => {
+                // Keep if affix appears in multiple reads (same as Leaf)
+                let affix_str = &reads[key.0][key.1..key.2];
+                trie.affix_contributors
+                    .get(affix_str)
+                    .map_or(false, |set| set.len() > 1)
+            }
         });
 
         log::info!("Phase 2 complete: pruned to {} nodes", trie.nodes.len());
+
+        // Debug: dump all nodes after pruning
+        log::debug!("[TRIE_PHASE2] Nodes after pruning:");
+        for (key, node) in trie.nodes.iter() {
+            let affix_str = &reads[key.0][key.1..key.2];
+            let node_type = match node {
+                AffixNode::Delta { .. } => "Delta",
+                AffixNode::Leaf => "Leaf",
+                AffixNode::Chain { .. } => "Chain",
+            };
+            let contributors = trie
+                .affix_contributors
+                .get(affix_str)
+                .map(|s| s.len())
+                .unwrap_or(0);
+            log::debug!(
+                "  [{}, {}..{}] '{}' {} (contributors: {})",
+                key.0,
+                key.1,
+                key.2,
+                affix_str,
+                node_type,
+                contributors
+            );
+        }
 
         // Phase 3 & 4: K-mer fuzzy matching (only if max_diff is meaningful)
         // Skip for very small max_diff values where fuzzy matching adds little value
@@ -566,8 +628,22 @@ impl PrunedAffixTrie {
                     }
                 }
 
-                // Chains don't generate overlaps (no branching)
-                _ => {}
+                // Chain nodes: same as Leaf, generate candidates if shared by multiple reads
+                AffixNode::Chain { .. } => {
+                    let affix_str = &reads[key.0][key.1..key.2];
+                    if let Some(contributors) = self.affix_contributors.get(affix_str) {
+                        if contributors.len() > 1 {
+                            let ids: Vec<usize> = contributors.iter().copied().collect();
+                            for &read1 in &ids {
+                                for &read2 in &ids {
+                                    if read1 != read2 {
+                                        candidates.push((read1, read2, affix_str.to_string()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

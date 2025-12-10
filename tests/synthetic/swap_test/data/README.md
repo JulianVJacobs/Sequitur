@@ -2,60 +2,85 @@
 
 This test is designed to ensure the swap square optimisation logic is exercised and validated.
 
-## Matrix Structure
-We want a 4x4 overlap matrix with a swap square between reads 1 and 2:
+## Actual Read Sequences
+```
+0 read0: TTAAAGTTAAAAAAAAAAAAAAGGGAAACCC
+1 read3: CCCTTTTTAAAGTTTTTTTTTGGGGAAACCC
+2 read1: GAAACCCCCCCCCCCCCCCCTTTTTAAAGTT
+3 read2: GGGAAACCCGGGGGGGGGGGGGGGGGGGGGG
+```
 
-|   | 0 | 1 | 2 | 3 |
-|---|---|---|---|---|
-| 0 | X | A | 0 | 0 |
-| 1 | B | X | 0 | 0 |
-| 2 | 0 | 0 | X | C |
-| 3 | 0 | 0 | D | X |
+## Expected Adjacency Matrix (Overlap Scores)
+
+|   |  0  |  1  |  2  |  3  |
+|---|-----|-----|-----|-----|
+| 0 |  31 |   0 |   8 |   0 |
+| 1 |   3 |  31 |  14 |   0 |
+| 2 |   7 |   7 |  31 |   0 |
+| 3 |   9 |   9 |   0 |  31 |
 
 Where:
-- X = self overlap (irrelevant)
-- A, B = overlaps between reads 0 and 1 (swap square)
-- C, D = overlaps between reads 2 and 3 (no swap square)
+- Diagonal (31) = read length (self-overlap, forbidden in cost matrix)
+- 0 = no overlap exists between these reads
+- Non-zero off-diagonal = overlap score (quality-adjusted)
 
-## Read Construction
-To create a swap square, reads 0 and 1 should overlap each other in both directions with similar scores. Reads 2 and 3 should overlap only in one direction.
-
-Example:
-- read0: AAAACCCC
-- read1: CCCCAAAA
-- read2: GGGGTTTT
-- read3: TTTTGGGG
-
-This produces:
-- read0 overlaps read1 (suffix/prefix: CCCC)
-- read1 overlaps read0 (suffix/prefix: AAAA)
-- read2 overlaps read3 (suffix/prefix: TTTT)
-- read3 overlaps read2 (suffix/prefix: GGGG)
+Key overlaps:
+- 0→2: score 8 (overlap length 7)
+- 1→0: score 3
+- 1→2: score 14 (overlap length 14)
+- 2→0: score 7, 2→1: score 7 (swap square: rows 1 and 2 both overlap)
+- 3→0: score 9, 3→1: score 9
 
 ## FASTQ Files
 ### reads_1.fastq
+```
 @read0
-AAAACCCC
+TTAAAGTTAAAAAAAAAAAAAAGGGAAACCC
 +
-IIIIIIII
-@read2
-GGGGTTTT
+IIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+@read3
+CCCTTTTTAAAGTTTTTTTTTGGGGAAACCC
 +
-IIIIIIII
+IIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+```
 
 ### reads_2.fastq
+```
 @read1
-CCCCAAAA
+GAAACCCCCCCCCCCCCCCCTTTTTAAAGTT
 +
-IIIIIIII
-@read3
-TTTTGGGG
+IIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+@read2
+GGGAAACCCGGGGGGGGGGGGGGGGGGGGGG
 +
-IIIIIIII
+IIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+```
+
+## Expected Cost Matrix (for LAPJV)
+
+After negating scores and marking missing edges as INF:
+
+|   |  0  |  1  |  2  |  3  |
+|---|-----|-----|-----|-----|
+| 0 |  31 | inf |  -8 | inf |
+| 1 |  -3 |  31 | -14 | inf |
+| 2 |  -7 |  -7 |  31 | inf |
+| 3 |  -9 |  -9 | inf |  31 |
+
+- Diagonal = 31 (or INF to forbid self-assignments)
+- Missing edges = INF (forbidden)
+- Real overlaps = negative score (higher overlap → lower cost)
+
+## Expected Assembly Path
+
+LAPJV should find the minimum-cost perfect matching. With the above costs, the optimal path is likely `[0, 2, 1, 3]` assembling:
+- 0 → 2 (cost -8)
+- 2 → 1 (cost -7)  
+- 1 self or 3 terminus
 
 ## Expected Swap Square
-- Swap square between read0/read1
-- No swap square between read2/read3
+- Rows 1 and 2 both have overlaps to columns 0 and 1
+- This creates potential ambiguity in assembly order
 
 ## Usage
 Run the CLI with these files and --optimise-diagonal. The optimiser should detect and swap the ambiguous region for maximal diagonal sum.

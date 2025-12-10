@@ -461,7 +461,7 @@ fn run_pipeline(
     );
 
     let (assembled, assembly_path) =
-        find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, None);
+        find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, &read_ids, None);
     debug!("[DEBUG] Assembly sequence length: {}", assembled.len());
     debug!("[DEBUG] Assembly path order: {:?}", assembly_path);
 
