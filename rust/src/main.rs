@@ -82,14 +82,6 @@ struct Args {
     #[arg(long)]
     optimise_diagonal: bool,
 
-    /// Assignment solver to use: "sparse", "dense", or "auto" (default: sparse)
-    #[arg(long, default_value = "dense")]
-    solver: String,
-
-    /// Density threshold (0..1) for auto solver to switch to dense when exceeded
-    #[arg(long, default_value_t = 0.1)]
-    dense_threshold: f64,
-
     /// Use the original array-based affix structure instead of the trie (trie is default)
     #[arg(long)]
     use_array: bool,
@@ -119,27 +111,10 @@ fn main() {
     } else {
         "error"
     };
-    // Only set process-wide environment variables when safe:
-    // - Always safe on Windows
-    // - Safe on other OSes only if we are still single-threaded (i.e., not using threads)
-    let can_set_env = cfg!(windows) || !args.threads;
-    if can_set_env {
-        unsafe {
-            std::env::set_var("RUST_LOG", log_level);
-            // Propagate solver choice to matching via env vars (keeps API surface small)
-            std::env::set_var("SEQUITUR_SOLVER", args.solver.clone());
-            std::env::set_var(
-                "SEQUITUR_DENSE_THRESHOLD",
-                format!("{}", args.dense_threshold),
-            );
-        }
-        env_logger::init();
-    } else {
-        // Avoid calling `set_var` in a multi-threaded program on non-Windows targets.
-        eprintln!("Not setting environment variables because threaded overlap construction is enabled; using programmatic logger configuration instead.");
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
-            .init();
+    unsafe {
+        std::env::set_var("RUST_LOG", log_level);
     }
+    env_logger::init();
 
     info!("Sequitur Rust prototype");
     info!("reads1: {}", args.reads1);
