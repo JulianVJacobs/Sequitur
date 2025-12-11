@@ -34,7 +34,7 @@ From: alpine:3.18
     /root/.cargo/bin/cargo build --release --features parallel
 
     # Install the built binary to a standard location (if present)
-    install -Dm755 target/release/sequitur_rs /usr/local/bin/sequitur_rs || true
+    install -Dm755 target/release/sequitur /usr/local/bin/sequitur || true
 
     # Copy helper scripts (optional)
     install -d /opt/sequitur/scripts || true
@@ -46,5 +46,5 @@ From: alpine:3.18
 %help
     This image is based on Alpine and provides the Sequitur experiment environment.
     It installs build tooling, Rust via rustup, a few Python packages, then clones
-    and builds the project's Rust release binary `sequitur_rs` and installs it to
-    `/usr/local/bin/sequitur_rs` inside the image.
+    and builds the project's Rust release binary `sequitur` and installs it to
+    `/usr/local/bin/sequitur` inside the image.

@@ -22,17 +22,17 @@ from sequitur_core import (
 
 # Try to use Rust implementation for alternative paths (much faster)
 try:
-    import sequitur_rs
+    import sequitur
     _USE_RUST_ALTERNATIVES = True
     _analyse_alternatives_fallback = None
 except ImportError:
-    sequitur_rs = None
+    sequitur = None
     from sequitur_core import analyse_alternatives as _analyse_alternatives_fallback
     _USE_RUST_ALTERNATIVES = False
     import warnings
     warnings.warn(
         "Using pure Python alternative path detection. "
-        "Install sequitur_rs for 30x better performance.",
+        "Install sequitur for 30x better performance.",
         UserWarning,
     )
 
@@ -198,7 +198,7 @@ def assemble(args: argparse.Namespace) -> None:
     if args.analyse_alternatives:
         if _USE_RUST_ALTERNATIVES:
             # Use fast Rust implementation
-            rust_result = sequitur_rs.analyse_alternative_paths(reads, args.score_gap)
+            rust_result = sequitur.analyse_alternative_paths(reads, args.score_gap)
             alternatives_result = {
                 "squares": [(s["i"], s["j"], s["delta"]) for s in rust_result["squares"]],
                 "components": rust_result["components"],

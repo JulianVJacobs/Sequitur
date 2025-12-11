@@ -55,14 +55,14 @@ cd rust
 cargo build --release
 
 # Run assembly
-./target/release/sequitur_rs \
+./target/release/sequitur \
     ../tests/fixtures/reads1.fastq \
     ../tests/fixtures/reads2.fastq \
     --output-fasta results/assembled.fasta \
     --reference reference.fasta
 
 # Detect alternative paths
-./target/release/sequitur_rs \
+./target/release/sequitur \
     reads1.fastq reads2.fastq \
     --analyse-alternatives \
     --alternatives-json results/alternatives.json \

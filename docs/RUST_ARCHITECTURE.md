@@ -60,14 +60,14 @@ maturin develop --release
 Then in Python:
 
 ```python
-import sequitur_rs
+import sequitur
 
 # Assemble reads
-result = sequitur_rs.assemble_from_reads(reads)
+result = sequitur.assemble_from_reads(reads)
 print(result.best)
 
 # Analyse alternative paths
-analysis = sequitur_rs.analyse_alternative_paths(reads, score_gap=5.0)
+analysis = sequitur.analyse_alternative_paths(reads, score_gap=5.0)
 print(f"Found {len(analysis['cycles'])} cycles")
 ```
 
@@ -78,8 +78,8 @@ cd rust
 cargo build --release --lib
 
 # Copy to Python-importable location
-cp target/release/libsequitur_rs.so \
-   target/release/sequitur_rs.$(python3 -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
+cp target/release/libsequitur.so \
+   target/release/sequitur.$(python3 -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 
 # Add to path
 export PYTHONPATH="$(pwd)/target/release:$PYTHONPATH"
@@ -89,19 +89,19 @@ export PYTHONPATH="$(pwd)/target/release:$PYTHONPATH"
 
 ### Python Bindings & Threading
 
-All Rust functions are exposed through `sequitur_rs` and now support threading configuration:
+All Rust functions are exposed through `sequitur` and now support threading configuration:
 
 ```python
-import sequitur_rs
+import sequitur
 
 # Assembly (threading enabled)
-result = sequitur_rs.assemble_from_reads(reads, use_threads=True, max_workers=8)
+result = sequitur.assemble_from_reads(reads, use_threads=True, max_workers=8)
 
 # Read analysis (threading enabled)
-analysis = sequitur_rs.analyse_reads(reads, use_threads=True, max_workers=8)
+analysis = sequitur.analyse_reads(reads, use_threads=True, max_workers=8)
 
 # Alternative path detection (threading enabled)
-alternatives = sequitur_rs.analyse_alternative_paths(
+alternatives = sequitur.analyse_alternative_paths(
     reads,
     score_gap=5.0,
     use_threads=True,
@@ -143,13 +143,13 @@ result = analyse_alternatives(matrix)
 
 ### New (Recommended)
 ```python
-import sequitur_rs
+import sequitur
 
 # High-level API - recommended
-result = sequitur_rs.analyse_alternative_paths(reads, score_gap=5.0)
+result = sequitur.analyse_alternative_paths(reads, score_gap=5.0)
 
 # Or use assembly result directly
-assembly = sequitur_rs.assemble_from_reads(reads)
+assembly = sequitur.assemble_from_reads(reads)
 ```
 
 ### Python CLI Compatibility & Threading
@@ -191,7 +191,7 @@ maturin develop --release
 pytest tests/
 
 # CLI smoke test
-./rust/target/release/sequitur_rs \
+./rust/target/release/sequitur \
     tests/fixtures/simple.fastq \
     tests/fixtures/simple.fastq \
     --output-fasta /tmp/test.fasta
@@ -206,7 +206,7 @@ The pure Python implementation (`python/sequitur_core/`) is **deprecated**:
 - 🐌 30x slower than Rust
 - 🔜 Will be archived in future release
 
-**Do not use for production.** Use `sequitur_rs` instead.
+**Do not use for production.** Use `sequitur` instead.
 
 ## Future Cleanup
 
@@ -220,7 +220,7 @@ mv python/tests/test_alternative_paths.py python/.archive/
 # Keep only:
 # - rust/src/alternative_paths.rs (source of truth)
 # - rust/src/python_bindings.rs (Python interface)
-# - Integration tests using sequitur_rs
+# - Integration tests using sequitur
 ```
 
 ## FAQ

@@ -54,6 +54,7 @@ impl RootsList {
         }
     }
 
+    #[allow(dead_code)]
     fn contains(&self, read_idx: usize) -> bool {
         match self {
             Self::Empty => false,
@@ -62,9 +63,10 @@ impl RootsList {
         }
     }
 
-    fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty)
-    }
+    // Soft removal of unused function
+    // // fn is_empty(&self) -> bool {
+    // //     matches!(self, Self::Empty)
+    // // }
 
     fn iter(&self) -> RootsListIter<'_> {
         RootsListIter {
@@ -544,29 +546,30 @@ impl PrunedAffixTrie {
         }
     }
 
-    /// Check if a chain node links to a different read.
-    fn has_cross_read_link(key: AffixSlice, node: &AffixNode) -> bool {
-        let own_read = key.0;
+    // Soft removal of unused function
+    // /// Check if a chain node links to a different read.
+    // // fn has_cross_read_link(key: AffixSlice, node: &AffixNode) -> bool {
+    // //     let own_read = key.0;
 
-        if let AffixNode::Chain {
-            prefix_link,
-            suffix_link,
-        } = node
-        {
-            if let Some(prefix) = prefix_link {
-                if prefix.0 != own_read {
-                    return true;
-                }
-            }
-            if let Some(suffix) = suffix_link {
-                if suffix.0 != own_read {
-                    return true;
-                }
-            }
-        }
+    // //     if let AffixNode::Chain {
+    // //         prefix_link,
+    // //         suffix_link,
+    // //     } = node
+    // //     {
+    // //         if let Some(prefix) = prefix_link {
+    // //             if prefix.0 != own_read {
+    // //                 return true;
+    // //             }
+    // //         }
+    // //         if let Some(suffix) = suffix_link {
+    // //             if suffix.0 != own_read {
+    // //                 return true;
+    // //             }
+    // //         }
+    // //     }
 
-        false
-    }
+    // //     false
+    // // }
 
     /// Generate all overlap candidates from the trie.
     /// Returns a vector of (suffix_idx, prefix_idx, affix_key) tuples.

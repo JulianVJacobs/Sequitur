@@ -13,11 +13,11 @@ set -euo pipefail
 #   - Optional alternatives JSON if --analyse-alternatives passed
 #
 # Requirements:
-#   - Rust sequitur_rs binary built (rust/target/release/sequitur_rs)
+#   - Rust sequitur binary built (rust/target/release/sequitur)
 #   - Synthetic datasets generated (tests/fixtures/synthetic/)
 #   - /usr/bin/time (GNU time for memory stats) or fallback to shell time
 
-RUST_BIN="rust/target/release/sequitur_rs"
+RUST_BIN="rust/target/release/sequitur"
 OUT_DIR="tests/results/synthetic"
 TIERS="small,medium"
 ANALYSE_ALT=0

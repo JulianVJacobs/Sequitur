@@ -1,7 +1,6 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::affix::AffixMap;
 use crate::alternative_paths::analyse_alternatives;
 use crate::matching::detect_cycles;
 use crate::matching::find_first_subdiagonal_path;
@@ -51,18 +50,14 @@ fn assemble_from_reads(
         return Err(PyValueError::new_err("reads list is empty"));
     }
 
-    // Build affix map
-    let affix_map = AffixMap::build(&reads, 3);
-
-    // Create overlap graph with threading config
+    // Create overlap graph with threading config (trie-only)
     let config = OverlapConfig {
         use_threads: use_threads.unwrap_or(false),
         max_workers: max_workers.unwrap_or(1),
         use_trie: use_trie.unwrap_or(true),
         ..OverlapConfig::default()
     };
-    let (_affix_out, adjacency_matrix, overlap_matrix) =
-        create_overlap_graph(&reads, Some(affix_map), config);
+    let (_trie, adjacency_matrix, overlap_matrix) = create_overlap_graph(&reads, None, config);
 
     // Convert to CSC
     let adjacency_csc = adjacency_matrix.to_csc();
@@ -89,15 +84,13 @@ fn analyse_reads(
     if reads.is_empty() {
         return Err(PyValueError::new_err("reads list is empty"));
     }
-    let affix_map = AffixMap::build(&reads, 3);
     let config = OverlapConfig {
         use_threads: use_threads.unwrap_or(false),
         max_workers: max_workers.unwrap_or(1),
         use_trie: use_trie.unwrap_or(true),
         ..OverlapConfig::default()
     };
-    let (_affix_out, adjacency_matrix, overlap_matrix) =
-        create_overlap_graph(&reads, Some(affix_map), config);
+    let (_trie, adjacency_matrix, overlap_matrix) = create_overlap_graph(&reads, None, config);
 
     let adjacency = sparse_to_adjacency_local(&adjacency_matrix);
     let overlap_lengths = sparse_to_adjacency_local(&overlap_matrix);
@@ -157,16 +150,13 @@ fn analyse_alternative_paths(
         return Err(PyValueError::new_err("reads list is empty"));
     }
 
-    // Build overlap graph
-    let affix_map = AffixMap::build(&reads, 3);
     let config = OverlapConfig {
         use_threads: use_threads.unwrap_or(false),
         max_workers: max_workers.unwrap_or(1),
         use_trie: use_trie.unwrap_or(true),
         ..OverlapConfig::default()
     };
-    let (_affix_out, adjacency_matrix, _overlap_matrix) =
-        create_overlap_graph(&reads, Some(affix_map), config);
+    let (_trie, adjacency_matrix, _overlap_matrix) = create_overlap_graph(&reads, None, config);
 
     // Convert to CSC
     let adjacency_csc = adjacency_matrix.to_csc();
@@ -221,11 +211,24 @@ fn analyse_alternative_paths(
     Ok(dict.into())
 }
 
+/// Set the solver choice for matching code (`sparse`, `dense`, or `auto`).
+/// This sets environment variables read by the Rust matching module.
+#[pyfunction]
+fn set_assignment_solver(solver: &str, dense_threshold: Option<f64>) -> PyResult<()> {
+    let s = solver.to_string();
+    std::env::set_var("SEQUITUR_SOLVER", &s);
+    if let Some(thresh) = dense_threshold {
+        std::env::set_var("SEQUITUR_DENSE_THRESHOLD", format!("{}", thresh));
+    }
+    Ok(())
+}
+
 #[pymodule]
-fn sequitur_rs(_py: Python, m: &PyModule) -> PyResult<()> {
+fn sequitur(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<AssemblyResult>()?;
     m.add_function(wrap_pyfunction!(assemble_from_reads, m)?)?;
     m.add_function(wrap_pyfunction!(analyse_reads, m)?)?;
     m.add_function(wrap_pyfunction!(analyse_alternative_paths, m)?)?;
+    m.add_function(wrap_pyfunction!(set_assignment_solver, m)?)?;
     Ok(())
 }

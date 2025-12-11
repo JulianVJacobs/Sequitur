@@ -36,7 +36,7 @@ Options:
 ### Rust
 
 ```bash
-./sequitur_rs reads1.fastq reads2.fastq \
+./sequitur reads1.fastq reads2.fastq \
   --analyse-alternatives \
   --score-gap 5.0 \
   --alternatives-json results/alternatives.json \

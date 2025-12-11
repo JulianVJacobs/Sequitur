@@ -140,69 +140,435 @@ pub fn find_first_subdiagonal_path(
     read_ids: &[String],
     _qualities: Option<&[Vec<i32>]>,
 ) -> (String, Vec<usize>) {
-    // Build cost matrix from quality-adjusted scores in adjacency matrix
+    // We'll construct a dense cost matrix only if/when the dense solver is chosen
     use ndarray::Array2;
     let n = matrix.rows();
-    let mut cost_matrix = Array2::<f64>::zeros((n, n));
-    for i in 0..n {
-        for j in 0..n {
-            // Use quality-adjusted score from adjacency matrix (has error penalty applied)
-            let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
-            cost_matrix[(i, j)] = -score
+    let mut cost_matrix_opt: Option<Array2<f64>> = None;
+    debug!("[DEBUG] Cost matrix for assignment solver");
+    // Build a temporary dense matrix for debug printing only when debug logging
+    // is enabled. This avoids allocating unless the user requested debug output.
+    if log::log_enabled!(log::Level::Debug) {
+        for i in 0..n {
+            let mut row: Vec<f64> = Vec::with_capacity(n);
+            for j in 0..n {
+                let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
+                row.push(-score);
+            }
+            debug!("  row {}: {:?}", i, row);
         }
     }
-    debug!("[DEBUG] Cost matrix for lapjv assignment:");
-    for i in 0..n {
-        let row: Vec<f64> = (0..n).map(|j| cost_matrix[(i, j)]).collect();
-        debug!("  row {}: {:?}", i, row);
-    }
-    let path = match lapjv(&cost_matrix) {
-        Ok((assignment_vec, col_assignments)) => {
-            debug!("[DEBUG] lapjv Assignment vector: {:?}", assignment_vec);
-            debug!("[DEBUG] lapjv Col assignments: {:?}", col_assignments);
-            debug!("[DEBUG] lapjv Assignment selected costs:");
-            for (i, &j) in assignment_vec.iter().enumerate() {
-                let cost = cost_matrix[(i, j)];
-                debug!("  row {} -> col {} : {}", i, j, cost);
-            }
-            // Reconstruct path by following assignment links from a true start node
-            let mut assigned = vec![false; n];
-            let mut path = Vec::with_capacity(n);
-            // Find a start node (not assigned to by any other)
-            let mut assigned_to: Vec<Option<usize>> = vec![None; n];
-            for (i, &j) in assignment_vec.iter().enumerate() {
-                assigned_to[j] = Some(i);
-            }
-            let mut start = None;
-            for i in 0..n {
-                if assigned_to[i].is_none() {
-                    start = Some(i);
-                    break;
-                }
-            }
-            let mut current = match start {
-                Some(idx) if idx < n => idx,
-                _ => 0,
-            };
-            // Walk the primary component starting from the chosen start
-            for _ in 0..n {
-                if assigned[current] {
-                    break;
-                }
-                path.push(current);
-                assigned[current] = true;
-                let next = assignment_vec[current];
-                if assigned[next] {
-                    break;
-                }
-                current = next;
-            }
 
-            // Walk any remaining components separately to avoid fabricating edges
-            while assigned.iter().any(|&v| !v) {
-                // pick the lowest-index unvisited node as a new component start
-                let next_start = assigned.iter().position(|&v| !v).unwrap_or(0);
-                let mut current = next_start;
+    // Solver selection: env var SEQUITUR_SOLVER = "sparse" | "dense" | "auto"
+    // default: "sparse". If "auto", fallback to dense when density > threshold.
+    let solver_env = std::env::var("SEQUITUR_SOLVER").unwrap_or_else(|_| "sparse".to_string());
+    let threshold: f64 = std::env::var("SEQUITUR_DENSE_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.1);
+    let nnz = matrix.data().len();
+    let density = (nnz as f64) / ((n * n) as f64);
+    let chosen = match solver_env.as_str() {
+        "dense" => "dense",
+        "sparse" => "sparse",
+        "auto" => {
+            if density > threshold {
+                "dense"
+            } else {
+                "sparse"
+            }
+        }
+        _ => "sparse",
+    };
+    log::info!(
+        "[SOLVER] Using {} solver for assignment (density={:.4})",
+        chosen,
+        density
+    );
+
+    let path: Vec<usize> = {
+        if chosen == "dense" {
+            // Build dense cost matrix for LAPJV
+            if cost_matrix_opt.is_none() {
+                let mut cm = Array2::<f64>::zeros((n, n));
+                for i in 0..n {
+                    for j in 0..n {
+                        let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
+                        cm[(i, j)] = -score;
+                    }
+                }
+                cost_matrix_opt = Some(cm);
+            }
+            let cost_matrix = cost_matrix_opt.as_ref().unwrap();
+            // Try dense LAPJV
+            match lapjv(cost_matrix) {
+                Ok((assignment_vec, _col_assignments)) => {
+                    // Reconstruct path from assignment_vec
+                    let mut assigned = vec![false; n];
+                    let mut path = Vec::with_capacity(n);
+                    let mut assigned_to: Vec<Option<usize>> = vec![None; n];
+                    for (i, &j) in assignment_vec.iter().enumerate() {
+                        assigned_to[j] = Some(i);
+                    }
+                    let mut start = None;
+                    for i in 0..n {
+                        if assigned_to[i].is_none() {
+                            start = Some(i);
+                            break;
+                        }
+                    }
+                    let mut current = match start {
+                        Some(idx) if idx < n => idx,
+                        _ => 0,
+                    };
+                    for _ in 0..n {
+                        if assigned[current] {
+                            break;
+                        }
+                        path.push(current);
+                        assigned[current] = true;
+                        let next = assignment_vec[current];
+                        if assigned[next] {
+                            break;
+                        }
+                        current = next;
+                    }
+                    while assigned.iter().any(|&v| !v) {
+                        let next_start = assigned.iter().position(|&v| !v).unwrap_or(0);
+                        let mut current = next_start;
+                        for _ in 0..n {
+                            if assigned[current] {
+                                break;
+                            }
+                            path.push(current);
+                            assigned[current] = true;
+                            let next = assignment_vec[current];
+                            if assigned[next] {
+                                break;
+                            }
+                            current = next;
+                        }
+                    }
+                    if let Some(violation) = validate_assembly_path(&path, &cost_matrix, read_ids) {
+                        log::warn!("[PATH_VALIDATION] {}", violation);
+                    }
+                    path
+                }
+                Err(e) => {
+                    log::info!(
+                        "[LAPJV] Assignment failed: {:?}. Falling back to greedy assembly.",
+                        e
+                    );
+                    // Greedy fallback (original logic)
+                    let csr = matrix.to_csr();
+                    let csc = matrix.to_csc();
+                    let (row_count, _) = csr.shape();
+                    let mut col_sums = vec![0usize; row_count];
+                    for (col_idx, col_vec) in csc.outer_iterator().enumerate() {
+                        let sum: usize = col_vec.data().iter().copied().sum();
+                        col_sums[col_idx] = sum;
+                    }
+                    let mut row_sums = vec![0usize; row_count];
+                    for (row_idx, row_vec) in csr.outer_iterator().enumerate() {
+                        row_sums[row_idx] = row_vec.data().iter().copied().sum();
+                    }
+                    let mut start = argmin_index(&col_sums).unwrap_or(0);
+                    let col_sum_val = if start < col_sums.len() {
+                        col_sums[start]
+                    } else {
+                        0
+                    };
+                    if col_sum_val != 0 {
+                        start = argmin_index(&row_sums).unwrap_or(start);
+                    }
+                    start = start.min(reads.len().saturating_sub(1));
+                    let mut path = Vec::with_capacity(reads.len());
+                    let mut visited = HashSet::with_capacity(reads.len());
+                    path.push(start);
+                    visited.insert(start);
+                    let overlap_csr = overlap_csc.to_csr();
+                    let mut current = start;
+                    let mut tried_for_node: HashMap<usize, HashSet<usize>> = HashMap::new();
+                    while visited.len() < reads.len() {
+                        let tried = tried_for_node.entry(current).or_insert_with(HashSet::new);
+                        let mut best: Option<(usize, usize, usize)> = None;
+                        if let Some(row_vec) = csr.outer_view(current) {
+                            for (col_idx, &weight) in
+                                row_vec.indices().iter().zip(row_vec.data().iter())
+                            {
+                                let target = *col_idx;
+                                if tried.contains(&target) {
+                                    continue;
+                                }
+                                if visited.contains(&target) {
+                                    continue;
+                                }
+                                let overlap = overlap_csr
+                                    .get(current, target)
+                                    .copied()
+                                    .unwrap_or_default();
+                                match best {
+                                    None => best = Some((target, weight, overlap)),
+                                    Some((bt, bw, bo)) => {
+                                        if weight > bw
+                                            || (weight == bw && overlap > bo)
+                                            || (weight == bw && overlap == bo && target < bt)
+                                        {
+                                            best = Some((target, weight, overlap));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        match best.map(|(t, _, _)| t) {
+                            Some(next) => {
+                                let is_backward =
+                                    path.contains(&next) && path.last() != Some(&next);
+                                if is_backward {
+                                    if is_swap_square(current, next, &csc) {
+                                        path.push(next);
+                                        visited.insert(next);
+                                        current = next;
+                                    } else {
+                                        tried.insert(next);
+                                        continue;
+                                    }
+                                } else {
+                                    path.push(next);
+                                    visited.insert(next);
+                                    current = next;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    if visited.len() < reads.len() {
+                        let mut remaining: Vec<usize> = (0..reads.len())
+                            .filter(|idx| !visited.contains(idx))
+                            .collect();
+                        remaining
+                            .sort_by_key(|idx| col_sums.get(*idx).copied().unwrap_or(usize::MAX));
+                        for idx in remaining {
+                            path.push(idx);
+                        }
+                    }
+                    debug!("[DEBUG] Fallback reconstructed path (indices): {:?}", path);
+                    debug!("[DEBUG] Overlap scores along fallback path:");
+                    for w in path.windows(2) {
+                        let i = w[0];
+                        let j = w[1];
+                        let score = matrix.get(i, j).copied().unwrap_or(0);
+                        debug!("  {} -> {} : {}", i, j, score);
+                    }
+                    path
+                }
+            }
+        } else {
+            // Try sparse solver first
+            let sparse_assign = crate::sparse_assignment(&matrix.to_csc());
+            let matched = sparse_assign.iter().filter(|o| o.is_some()).count();
+            if matched < n {
+                log::info!(
+                    "[SOLVER] Sparse solver matched {}/{} rows — falling back to dense lapjv",
+                    matched,
+                    n
+                );
+                // fallback to dense (build dense cost matrix if needed and reuse dense branch logic)
+                if cost_matrix_opt.is_none() {
+                    let mut cm = Array2::<f64>::zeros((n, n));
+                    for i in 0..n {
+                        for j in 0..n {
+                            let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
+                            cm[(i, j)] = -score;
+                        }
+                    }
+                    cost_matrix_opt = Some(cm);
+                }
+                let cost_matrix = cost_matrix_opt.as_ref().unwrap();
+                match lapjv(cost_matrix) {
+                    Ok((assignment_vec, _)) => {
+                        let mut assigned = vec![false; n];
+                        let mut path = Vec::with_capacity(n);
+                        let mut assigned_to: Vec<Option<usize>> = vec![None; n];
+                        for (i, &j) in assignment_vec.iter().enumerate() {
+                            assigned_to[j] = Some(i);
+                        }
+                        let mut start = None;
+                        for i in 0..n {
+                            if assigned_to[i].is_none() {
+                                start = Some(i);
+                                break;
+                            }
+                        }
+                        let mut current = match start {
+                            Some(idx) if idx < n => idx,
+                            _ => 0,
+                        };
+                        for _ in 0..n {
+                            if assigned[current] {
+                                break;
+                            }
+                            path.push(current);
+                            assigned[current] = true;
+                            let next = assignment_vec[current];
+                            if assigned[next] {
+                                break;
+                            }
+                            current = next;
+                        }
+                        while assigned.iter().any(|&v| !v) {
+                            let next_start = assigned.iter().position(|&v| !v).unwrap_or(0);
+                            let mut current = next_start;
+                            for _ in 0..n {
+                                if assigned[current] {
+                                    break;
+                                }
+                                path.push(current);
+                                assigned[current] = true;
+                                let next = assignment_vec[current];
+                                if assigned[next] {
+                                    break;
+                                }
+                                current = next;
+                            }
+                        }
+                        if let Some(violation) =
+                            validate_assembly_path(&path, &cost_matrix, read_ids)
+                        {
+                            log::warn!("[PATH_VALIDATION] {}", violation);
+                        }
+                        path
+                    }
+                    Err(e) => {
+                        log::info!(
+                            "[LAPJV] Assignment failed: {:?}. Falling back to greedy assembly.",
+                            e
+                        );
+                        // greedy fallback (reuse code from dense Err branch)
+                        let csr = matrix.to_csr();
+                        let csc = matrix.to_csc();
+                        let (row_count, _) = csr.shape();
+                        let mut col_sums = vec![0usize; row_count];
+                        for (col_idx, col_vec) in csc.outer_iterator().enumerate() {
+                            let sum: usize = col_vec.data().iter().copied().sum();
+                            col_sums[col_idx] = sum;
+                        }
+                        let mut row_sums = vec![0usize; row_count];
+                        for (row_idx, row_vec) in csr.outer_iterator().enumerate() {
+                            row_sums[row_idx] = row_vec.data().iter().copied().sum();
+                        }
+                        let mut start = argmin_index(&col_sums).unwrap_or(0);
+                        let col_sum_val = if start < col_sums.len() {
+                            col_sums[start]
+                        } else {
+                            0
+                        };
+                        if col_sum_val != 0 {
+                            start = argmin_index(&row_sums).unwrap_or(start);
+                        }
+                        start = start.min(reads.len().saturating_sub(1));
+                        let mut path = Vec::with_capacity(reads.len());
+                        let mut visited = HashSet::with_capacity(reads.len());
+                        path.push(start);
+                        visited.insert(start);
+                        let overlap_csr = overlap_csc.to_csr();
+                        let mut current = start;
+                        let mut tried_for_node: HashMap<usize, HashSet<usize>> = HashMap::new();
+                        while visited.len() < reads.len() {
+                            let tried = tried_for_node.entry(current).or_insert_with(HashSet::new);
+                            let mut best: Option<(usize, usize, usize)> = None;
+                            if let Some(row_vec) = csr.outer_view(current) {
+                                for (col_idx, &weight) in
+                                    row_vec.indices().iter().zip(row_vec.data().iter())
+                                {
+                                    let target = *col_idx;
+                                    if tried.contains(&target) {
+                                        continue;
+                                    }
+                                    if visited.contains(&target) {
+                                        continue;
+                                    }
+                                    let overlap = overlap_csr
+                                        .get(current, target)
+                                        .copied()
+                                        .unwrap_or_default();
+                                    match best {
+                                        None => best = Some((target, weight, overlap)),
+                                        Some((bt, bw, bo)) => {
+                                            if weight > bw
+                                                || (weight == bw && overlap > bo)
+                                                || (weight == bw && overlap == bo && target < bt)
+                                            {
+                                                best = Some((target, weight, overlap));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            match best.map(|(t, _, _)| t) {
+                                Some(next) => {
+                                    let is_backward =
+                                        path.contains(&next) && path.last() != Some(&next);
+                                    if is_backward {
+                                        if is_swap_square(current, next, &csc) {
+                                            path.push(next);
+                                            visited.insert(next);
+                                            current = next;
+                                        } else {
+                                            tried.insert(next);
+                                            continue;
+                                        }
+                                    } else {
+                                        path.push(next);
+                                        visited.insert(next);
+                                        current = next;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        if visited.len() < reads.len() {
+                            let mut remaining: Vec<usize> = (0..reads.len())
+                                .filter(|idx| !visited.contains(idx))
+                                .collect();
+                            remaining.sort_by_key(|idx| {
+                                col_sums.get(*idx).copied().unwrap_or(usize::MAX)
+                            });
+                            for idx in remaining {
+                                path.push(idx);
+                            }
+                        }
+                        debug!("[DEBUG] Fallback reconstructed path (indices): {:?}", path);
+                        debug!("[DEBUG] Overlap scores along fallback path:");
+                        for w in path.windows(2) {
+                            let i = w[0];
+                            let j = w[1];
+                            let score = matrix.get(i, j).copied().unwrap_or(0);
+                            debug!("  {} -> {} : {}", i, j, score);
+                        }
+                        path
+                    }
+                }
+            } else {
+                // Full matching found by sparse solver — reconstruct
+                let assignment_vec: Vec<usize> =
+                    sparse_assign.iter().map(|o| o.unwrap_or(0)).collect();
+                let mut assigned = vec![false; n];
+                let mut path = Vec::with_capacity(n);
+                let mut assigned_to: Vec<Option<usize>> = vec![None; n];
+                for (i, &j) in assignment_vec.iter().enumerate() {
+                    assigned_to[j] = Some(i);
+                }
+                let mut start = None;
+                for i in 0..n {
+                    if assigned_to[i].is_none() {
+                        start = Some(i);
+                        break;
+                    }
+                }
+                let mut current = match start {
+                    Some(idx) if idx < n => idx,
+                    _ => 0,
+                };
                 for _ in 0..n {
                     if assigned[current] {
                         break;
@@ -215,131 +581,29 @@ pub fn find_first_subdiagonal_path(
                     }
                     current = next;
                 }
-            }
-            debug!(
-                "[DEBUG] lapjv Assignment reconstructed path (indices): {:?}",
+                while assigned.iter().any(|&v| !v) {
+                    let next_start = assigned.iter().position(|&v| !v).unwrap_or(0);
+                    let mut current = next_start;
+                    for _ in 0..n {
+                        if assigned[current] {
+                            break;
+                        }
+                        path.push(current);
+                        assigned[current] = true;
+                        let next = assignment_vec[current];
+                        if assigned[next] {
+                            break;
+                        }
+                        current = next;
+                    }
+                }
+                if let Some(cm) = cost_matrix_opt.as_ref() {
+                    if let Some(violation) = validate_assembly_path(&path, cm, read_ids) {
+                        log::warn!("[PATH_VALIDATION] {}", violation);
+                    }
+                }
                 path
-            );
-            // Validate path against cost matrix
-            if let Some(violation) = validate_assembly_path(&path, &cost_matrix, read_ids) {
-                log::warn!("[PATH_VALIDATION] {}", violation);
             }
-            debug!("[DEBUG] Overlap scores along lapjv assignment path:");
-            let mut total_weight = 0;
-            for w in path.windows(2) {
-                let i = w[0];
-                let j = w[1];
-                let score = matrix.get(i, j).copied().unwrap_or(0);
-                debug!("  {} -> {} : {}", i, j, score);
-                total_weight += score;
-            }
-            debug!("[DEBUG] Total path weight: {}", total_weight);
-            path
-        }
-        Err(e) => {
-            log::info!(
-                "[LAPJV] Assignment failed: {:?}. Falling back to greedy assembly.",
-                e
-            );
-            // Fallback to greedy path if assignment fails
-            let csr = matrix.to_csr();
-            let csc = matrix.to_csc();
-            let (row_count, _) = csr.shape();
-            let mut col_sums = vec![0usize; row_count];
-            for (col_idx, col_vec) in csc.outer_iterator().enumerate() {
-                let sum: usize = col_vec.data().iter().copied().sum();
-                col_sums[col_idx] = sum;
-            }
-            let mut row_sums = vec![0usize; row_count];
-            for (row_idx, row_vec) in csr.outer_iterator().enumerate() {
-                row_sums[row_idx] = row_vec.data().iter().copied().sum();
-            }
-            let mut start = argmin_index(&col_sums).unwrap_or(0);
-            let col_sum_val = if start < col_sums.len() {
-                col_sums[start]
-            } else {
-                0
-            };
-            if col_sum_val != 0 {
-                start = argmin_index(&row_sums).unwrap_or(start);
-            }
-            start = start.min(reads.len().saturating_sub(1));
-            let mut path = Vec::with_capacity(reads.len());
-            let mut visited = HashSet::with_capacity(reads.len());
-            path.push(start);
-            visited.insert(start);
-            let overlap_csr = overlap_csc.to_csr();
-            let mut current = start;
-            let mut tried_for_node: HashMap<usize, HashSet<usize>> = HashMap::new();
-            while visited.len() < reads.len() {
-                let tried = tried_for_node.entry(current).or_insert_with(HashSet::new);
-                let mut best: Option<(usize, usize, usize)> = None;
-                if let Some(row_vec) = csr.outer_view(current) {
-                    for (col_idx, &weight) in row_vec.indices().iter().zip(row_vec.data().iter()) {
-                        let target = *col_idx;
-                        if tried.contains(&target) {
-                            continue;
-                        }
-                        if visited.contains(&target) {
-                            continue;
-                        }
-                        let overlap = overlap_csr
-                            .get(current, target)
-                            .copied()
-                            .unwrap_or_default();
-                        match best {
-                            None => best = Some((target, weight, overlap)),
-                            Some((bt, bw, bo)) => {
-                                if weight > bw
-                                    || (weight == bw && overlap > bo)
-                                    || (weight == bw && overlap == bo && target < bt)
-                                {
-                                    best = Some((target, weight, overlap));
-                                }
-                            }
-                        }
-                    }
-                }
-                match best.map(|(t, _, _)| t) {
-                    Some(next) => {
-                        let is_backward = path.contains(&next) && path.last() != Some(&next);
-                        if is_backward {
-                            if is_swap_square(current, next, &csc) {
-                                path.push(next);
-                                visited.insert(next);
-                                current = next;
-                            } else {
-                                tried.insert(next);
-                                continue;
-                            }
-                        } else {
-                            path.push(next);
-                            visited.insert(next);
-                            current = next;
-                        }
-                    }
-                    None => break,
-                }
-            }
-            if visited.len() < reads.len() {
-                let mut remaining: Vec<usize> = (0..reads.len())
-                    .filter(|idx| !visited.contains(idx))
-                    .collect();
-                remaining.sort_by_key(|idx| col_sums.get(*idx).copied().unwrap_or(usize::MAX));
-                for idx in remaining {
-                    path.push(idx);
-                }
-            }
-            // Debug: Print reconstructed path (fallback)
-            debug!("[DEBUG] Fallback reconstructed path (indices): {:?}", path);
-            debug!("[DEBUG] Overlap scores along fallback path:");
-            for w in path.windows(2) {
-                let i = w[0];
-                let j = w[1];
-                let score = matrix.get(i, j).copied().unwrap_or(0);
-                debug!("  {} -> {} : {}", i, j, score);
-            }
-            path
         }
     };
 

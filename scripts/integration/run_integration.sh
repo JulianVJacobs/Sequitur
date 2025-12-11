@@ -7,7 +7,7 @@ VERBOSE_FLAG=""
 if [ "${VERBOSE:-}" = "1" ]; then
   VERBOSE_FLAG="--verbose"
 fi
-RUST_BIN="$ROOT/rust/target/debug/sequitur_rs"
+RUST_BIN="$ROOT/rust/target/debug/sequitur"
 # Prefer project venv if present
 if [ -x "$ROOT/python/.venv/bin/python" ]; then
   PYTHON_BIN="$ROOT/python/.venv/bin/python"

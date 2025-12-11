@@ -1,5 +1,5 @@
 [package]
-name = "sequitur_rs"
+name = "sequitur"
 version = "0.1.0"
 edition = "2021"
 authors = ["Sequitur Project"]
@@ -24,7 +24,7 @@ ndarray = "0.16"
 num_cpus = "1.13"
 
 [lib]
-name = "sequitur_rs"
+name = "sequitur"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies.pyo3]

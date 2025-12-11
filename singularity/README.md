@@ -7,7 +7,7 @@
 Quick notes:
 
 - The definition builds from `alpine:3.18`, installs system build tools via `apk`, Rust, and a few Python packages used by experiments (adjust `pip3 install` as needed).
-- The def clones the GitHub repo and builds the Rust release binary `sequitur_rs` and installs it to `/usr/local/bin/sequitur_rs` inside the image.
+- The def clones the GitHub repo and builds the Rust release binary `sequitur` and installs it to `/usr/local/bin/sequitur` inside the image.
 - To build locally use one of these commands (on a machine with root or apptainer/singularity privileges):
 
 ```bash

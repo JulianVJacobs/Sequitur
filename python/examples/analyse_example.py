@@ -1,4 +1,4 @@
-"""Simple example showing how to call sequitur_rs.analyse_reads from the project venv.
+"""Simple example showing how to call sequitur.analyse_reads from the project venv.
 
 This prints adjacency, confidences, and detected cycles as JSON. If networkx is installed, it will
 also draw the adjacency graph with edge widths proportional to confidence.
@@ -6,9 +6,9 @@ also draw the adjacency graph with edge widths proportional to confidence.
 import json
 
 try:
-    import sequitur_rs as s
+    import sequitur as s
 except Exception as e:
-    print("Failed to import sequitur_rs:", e)
+    print("Failed to import sequitur:", e)
     raise
 
 reads = ["ACGT", "GTAA", "TACG"]

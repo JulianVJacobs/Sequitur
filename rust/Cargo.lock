@@ -1327,7 +1327,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4f410fedcf71af0345d7607d246e7ad15faaadd49d240ee3b24e5dc21a820ac"
 
 [[package]]
-name = "sequitur_rs"
+name = "sequitur"
 version = "0.1.0"
 dependencies = [
  "anyhow",

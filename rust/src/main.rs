@@ -11,7 +11,7 @@ use bio::io::{fasta, fastq};
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
 
-use sequitur_rs::{create_overlap_graph_unified, find_first_subdiagonal_path, OverlapConfig};
+use sequitur::{create_overlap_graph_unified, find_first_subdiagonal_path, OverlapConfig};
 
 /// Sequitur Rust CLI (prototype)
 #[derive(Parser, Debug)]
@@ -82,6 +82,14 @@ struct Args {
     #[arg(long)]
     optimise_diagonal: bool,
 
+    /// Assignment solver to use: "sparse", "dense", or "auto" (default: sparse)
+    #[arg(long, default_value = "sparse")]
+    solver: String,
+
+    /// Density threshold (0..1) for auto solver to switch to dense when exceeded
+    #[arg(long, default_value_t = 0.1)]
+    dense_threshold: f64,
+
     /// Use the original array-based affix structure instead of the trie (trie is default)
     #[arg(long)]
     use_array: bool,
@@ -91,7 +99,7 @@ struct Args {
     max_diff: f32,
 
     /// Minimum suffix/overlap length to consider (filters tiny overlaps)
-    #[arg(long, default_value_t = sequitur_rs::DEFAULT_MIN_SUFFIX_LEN)]
+    #[arg(long, default_value_t = sequitur::DEFAULT_MIN_SUFFIX_LEN)]
     min_suffix_len: usize,
 
     /// Exponent for error penalty in quality-adjusted scoring (1.0=linear, 2.0=quadratic)
@@ -111,10 +119,27 @@ fn main() {
     } else {
         "error"
     };
-    unsafe {
-        std::env::set_var("RUST_LOG", log_level);
+    // Only set process-wide environment variables when safe:
+    // - Always safe on Windows
+    // - Safe on other OSes only if we are still single-threaded (i.e., not using threads)
+    let can_set_env = cfg!(windows) || !args.threads;
+    if can_set_env {
+        unsafe {
+            std::env::set_var("RUST_LOG", log_level);
+            // Propagate solver choice to matching via env vars (keeps API surface small)
+            std::env::set_var("SEQUITUR_SOLVER", args.solver.clone());
+            std::env::set_var(
+                "SEQUITUR_DENSE_THRESHOLD",
+                format!("{}", args.dense_threshold),
+            );
+        }
+        env_logger::init();
+    } else {
+        // Avoid calling `set_var` in a multi-threaded program on non-Windows targets.
+        eprintln!("Not setting environment variables because threaded overlap construction is enabled; using programmatic logger configuration instead.");
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
+            .init();
     }
-    env_logger::init();
 
     info!("Sequitur Rust prototype");
     info!("reads1: {}", args.reads1);
@@ -408,7 +433,7 @@ fn run_pipeline(
     };
 
     if optimise_diagonal {
-        use sequitur_rs::alternative_paths::{detect_swap_squares, optimise_first_subdiagonal_sum};
+        use sequitur::alternative_paths::{detect_swap_squares, optimise_first_subdiagonal_sum};
         let squares = detect_swap_squares(&adjacency_matrix, None);
         optimise_first_subdiagonal_sum(&mut adjacency_matrix, &squares);
         info!(
@@ -467,7 +492,7 @@ fn run_pipeline(
 
     // Export combined alternatives JSONL if requested (per-read successors with assembly order)
     if let Some(json_path) = alternatives_jsonl {
-        use sequitur_rs::extract_read_alternatives;
+        use sequitur::extract_read_alternatives;
         use serde_json::json;
 
         let per_read = extract_read_alternatives(
@@ -610,7 +635,7 @@ mod smoke {
             1,     // max_workers
             false, // use_array
             0.25,
-            sequitur_rs::DEFAULT_MIN_SUFFIX_LEN,
+            sequitur::DEFAULT_MIN_SUFFIX_LEN,
             None, // export_read_map
             2.0,  // error_penalty_exponent
         );

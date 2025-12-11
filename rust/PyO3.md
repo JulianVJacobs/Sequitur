@@ -1,4 +1,4 @@
-# Python bindings for sequitur_rs (PyO3 prototype)
+# Python bindings for sequitur (PyO3 prototype)
 
 This document explains the minimal steps to build and use the Rust-based Sequitur functions from Python using PyO3/maturin.
 
@@ -22,7 +22,7 @@ maturin develop --release
 2) Use from Python / Jupyter
 
 ```python
-import sequitur_rs as sequitur
+import sequitur as sequitur
 
 reads = ["ACGT", "GTAA"]
 result = sequitur.assemble_from_reads(reads)

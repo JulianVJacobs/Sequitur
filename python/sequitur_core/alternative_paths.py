@@ -2,7 +2,7 @@
 
 .. deprecated:: 2024-11
    This pure Python implementation is deprecated in favor of the Rust
-   implementation with Python bindings (sequitur_rs.analyse_alternative_paths).
+   implementation with Python bindings (sequitur.analyse_alternative_paths).
    The Rust version is 30x faster and uses 4x less memory.
    
    This module is retained for reference and backwards compatibility only.
@@ -22,7 +22,7 @@ import numpy as np
 # Emit deprecation warning on import
 warnings.warn(
     "sequitur_core.alternative_paths is deprecated. "
-    "Use sequitur_rs.analyse_alternative_paths instead for 30x better performance.",
+    "Use sequitur.analyse_alternative_paths instead for 30x better performance.",
     DeprecationWarning,
     stacklevel=2,
 )

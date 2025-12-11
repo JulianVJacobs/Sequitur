@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use sequitur_rs::{create_overlap_graph, create_overlap_graph_unified, AffixMap, OverlapConfig};
+use sequitur::{create_overlap_graph_unified, OverlapConfig};
 use std::time::Duration;
 
 /// Benchmarks comparing trie vs array-based affix structures.
@@ -42,25 +42,8 @@ fn bench_trie_construction(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("build_trie", n), &reads, |b, reads| {
             b.iter(|| {
-                use sequitur_rs::affix::PrunedAffixTrie;
+                use sequitur::affix::PrunedAffixTrie;
                 let _trie = PrunedAffixTrie::build(black_box(reads), 3, 0.25);
-            });
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_array_construction(c: &mut Criterion) {
-    let mut group = c.benchmark_group("array_construction");
-    group.measurement_time(Duration::from_secs(10));
-
-    for n in [100, 500, 1000].iter() {
-        let reads = generate_synthetic_reads(*n, 150, 20);
-
-        group.bench_with_input(BenchmarkId::new("build_array", n), &reads, |b, reads| {
-            b.iter(|| {
-                let _array = AffixMap::build(black_box(reads), 3);
             });
         });
     }
@@ -92,42 +75,10 @@ fn bench_overlap_graph_trie(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_overlap_graph_array(c: &mut Criterion) {
-    let mut group = c.benchmark_group("overlap_graph_array");
-    group.measurement_time(Duration::from_secs(15));
-    group.sample_size(20);
-
-    for n in [100, 500].iter() {
-        let reads = generate_synthetic_reads(*n, 150, 20);
-
-        group.bench_with_input(BenchmarkId::new("full_pipeline", n), &reads, |b, reads| {
-            b.iter(|| {
-                let config = OverlapConfig {
-                    use_trie: false,
-                    max_diff: 0.25,
-                    min_suffix_len: 3,
-                    ..Default::default()
-                };
-                let affix_map = AffixMap::build(reads, 3);
-                let (_map, _adj, _ovl) =
-                    sequitur_rs::create_overlap_graph(black_box(reads), Some(affix_map), config);
-            });
-        });
-    }
-
-    group.finish();
-}
-
 // Removed: bench_candidate_generation, bench_verification_strategies,
 // bench_different_read_lengths, bench_error_rates
 // These are now in sequitur_benchmark.rs for comprehensive analysis
 
-criterion_group!(
-    benches,
-    bench_trie_construction,
-    bench_array_construction,
-    bench_overlap_graph_trie,
-    bench_overlap_graph_array,
-);
+criterion_group!(benches, bench_trie_construction, bench_overlap_graph_trie,);
 
 criterion_main!(benches);

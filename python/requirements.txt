@@ -91,7 +91,7 @@ rfc3986-validator==0.1.1
 rpds-py==0.19.1
 scipy==1.16.3
 Send2Trash==1.8.3
--e git+ssh://git@github.com/JulianVJacobs/Sequitur.git@200cfa750b86530cd8418eb6030eb55d079d6e22#egg=sequitur_rs
+-e git+ssh://git@github.com/JulianVJacobs/Sequitur.git@200cfa750b86530cd8418eb6030eb55d079d6e22#egg=sequitur
 setuptools==72.1.0
 six==1.16.0
 sniffio==1.3.1

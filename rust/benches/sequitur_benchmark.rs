@@ -1,11 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use sequitur_rs::affix::PrunedAffixTrie;
-use sequitur_rs::find_first_subdiagonal_path;
-use sequitur_rs::overlap::{
-    create_overlap_graph_unified, verify_overlap_from_anchor, OverlapConfig,
-};
+use sequitur::affix::PrunedAffixTrie;
+use sequitur::find_first_subdiagonal_path;
+use sequitur::overlap::{create_overlap_graph_unified, verify_overlap_from_anchor, OverlapConfig};
 use std::time::Duration;
 
 /// Generate synthetic reads with controlled overlaps
@@ -257,7 +255,8 @@ fn bench_end_to_end(c: &mut Criterion) {
                     create_overlap_graph_unified(black_box(reads), config);
                 let adj_csc = adj_matrix.to_csc();
                 let ovl_csc = ovl_matrix.to_csc();
-                let read_ids: Vec<String> = (0..reads.len()).map(|i| format!("read{}", i)).collect();
+                let read_ids: Vec<String> =
+                    (0..reads.len()).map(|i| format!("read{}", i)).collect();
                 find_first_subdiagonal_path(&adj_csc, &ovl_csc, reads, &read_ids, None)
             });
         });

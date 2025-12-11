@@ -91,7 +91,7 @@ Use the provided validation scripts or CLI to check assembly correctness against
 
 ```bash
 # Synthetic dataset
-./rust/target/release/sequitur_rs \
+./rust/target/release/sequitur \
   tests/synthetic/{dataset}/data/reads_1.fastq \
   tests/synthetic/{dataset}/data/reads_2.fastq \
   --output-fasta tests/synthetic/{dataset}/results/assembly.fasta \

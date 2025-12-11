@@ -2,7 +2,7 @@
 Overlap detection utilities for the Sequitur assembler (DEPRECATED).
 
 WARNING: This pure Python implementation is deprecated and much slower than the Rust version.
-For production, use the Rust library via PyO3 bindings (`sequitur_rs`).
+For production, use the Rust library via PyO3 bindings (`sequitur`).
 
 Threading logic here is legacy and not recommended for new code.
 See docs/RUST_ARCHITECTURE.md for migration guide and usage.
