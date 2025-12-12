@@ -83,7 +83,7 @@ struct Args {
     optimise_diagonal: bool,
 
     /// Assignment solver to use: "sparse", "dense", or "auto" (default: sparse)
-    #[arg(long, default_value = "sparse")]
+    #[arg(long, default_value = "dense")]
     solver: String,
 
     /// Density threshold (0..1) for auto solver to switch to dense when exceeded
