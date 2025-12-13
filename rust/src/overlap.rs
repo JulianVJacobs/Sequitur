@@ -368,7 +368,7 @@ pub fn verify_overlap_from_anchor(
         let distance = damerau_levenshtein(suffix_window, prefix_window);
         let float_diff = distance as f32 / span as f32;
 
-        if float_diff < config.max_diff {
+        if float_diff <= config.max_diff {
             // Quality-adjusted scoring: penalize errors based on error rate
             let error_rate = distance as f32 / span as f32;
             let quality_factor = (1.0 - error_rate).powf(config.error_penalty_exponent);
