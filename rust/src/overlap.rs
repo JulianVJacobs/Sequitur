@@ -414,7 +414,7 @@ fn verify_overlap_simple(
         let distance = damerau_levenshtein(suffix_window, prefix_window);
         let float_diff = distance as f32 / span as f32;
 
-        if float_diff < config.max_diff {
+        if float_diff <= config.max_diff {
             let score = (span as i32 - distance as i32) as f32;
             if score > best_score || (score == best_score && span > best_overlap) {
                 best_score = score;
