@@ -224,3 +224,24 @@ real:
         checksum_sha256: 7eb4d05c05c9e4080d3a76a78c9f7ea25ec3f676fbe64b8f59c7f91611c3d349
       - url: https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR111/058/SRR11117158/SRR11117158_2.fastq.gz
         checksum_sha256: 512481c2bd73595cc0cf79a4f59c7de07c52cf50b27d037f960dd3d80fa2de4d
+
+  - id: ERR353143
+    description: "Staphylococcus aureus paired-end sample"
+    paths:
+      data_dir: tests/real/ERR353143/data
+      results_dir: tests/real/ERR353143/results
+      reference: tests/real/ERR353143/data/reference.fna.gz
+      reads:
+        - tests/real/ERR353143/data/ERR353143_1.fastq.gz
+        - tests/real/ERR353143/data/ERR353143_2.fastq.gz
+    download:
+      script: scripts/download_dataset.sh
+      args: [ERR353143]
+    reads_remote:
+      - url: ftp://ftp.sra.ebi.ac.uk/vol1/fastq/ERR353/ERR353143/ERR353143_1.fastq.gz
+        checksum_sha256: c3ae08defdd0ab345b11f8d3a7d1830a1898658aecae76540d7ceec42aa162aa
+      - url: ftp://ftp.sra.ebi.ac.uk/vol1/fastq/ERR353/ERR353143/ERR353143_2.fastq.gz
+        checksum_sha256: 5e646155a2865c62fbefdca4f9e48498134ef93121dbafadadf1a42ae7a87c30
+    reference:
+      url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/746/505/GCF_000746505.1_ASM74650v1/GCF_000746505.1_ASM74650v1_genomic.fna.gz
+      checksum_sha256: 55c7b03260d4c87f63d25d4d9971147a84017efbb4e483c56691993620ca015a
