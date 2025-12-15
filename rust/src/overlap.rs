@@ -172,9 +172,15 @@ fn create_overlap_graph_from_trie(
 
     // Build best scores and spans for each read pair
     log::info!("Verifying {} candidates...", candidates.len());
+
+    // Per-source row maps: map dst -> (score, span)
+    let mut per_source: Vec<HashMap<usize, (f32, usize)>> =
+        (0..n).map(|_| HashMap::new()).collect();
+
     #[cfg(feature = "parallel")]
-    let (best_scores, best_spans) = {
-        // Parallel verification with thread-local HashMaps
+    {
+        // Parallel verification producing thread-local maps keyed by (src,dst),
+        // then merge into per_source to avoid a giant global tuple-key map.
         let local_results: Vec<HashMap<(usize, usize), (f32, usize)>> = candidates
             .par_iter()
             .fold(
@@ -197,27 +203,20 @@ fn create_overlap_graph_from_trie(
             )
             .collect();
 
-        // Merge thread-local results
-        let mut best_scores = HashMap::new();
-        let mut best_spans = HashMap::new();
+        // Merge thread-local results into per_source rows
         for local_map in local_results {
-            for (key, (score, span)) in local_map {
-                let prev_score = best_scores.get(&key).copied().unwrap_or(f32::MIN);
-                let prev_span = best_spans.get(&key).copied().unwrap_or(0);
-                if score > prev_score || (score == prev_score && span > prev_span) {
-                    best_scores.insert(key, score);
-                    best_spans.insert(key, span);
+            for ((src, dst), (score, span)) in local_map {
+                let row = &mut per_source[src];
+                let prev = row.get(&dst).copied().unwrap_or((f32::MIN, 0));
+                if score > prev.0 || (score == prev.0 && span > prev.1) {
+                    row.insert(dst, (score, span));
                 }
             }
         }
-        (best_scores, best_spans)
-    };
+    }
 
     #[cfg(not(feature = "parallel"))]
-    let (best_scores, best_spans) = {
-        let mut best_scores: HashMap<(usize, usize), f32> = HashMap::new();
-        let mut best_spans: HashMap<(usize, usize), usize> = HashMap::new();
-
+    {
         for (suffix_idx, prefix_idx, shared_affix) in &candidates {
             let suffix_read = &reads[*suffix_idx];
             let prefix_read = &reads[*prefix_idx];
@@ -232,10 +231,6 @@ fn create_overlap_graph_from_trie(
             if let Some((score, overlap_len)) =
                 verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config)
             {
-                let key = (*suffix_idx, *prefix_idx);
-                let prev_score = best_scores.get(&key).copied().unwrap_or(f32::MIN);
-                let prev_span = best_spans.get(&key).copied().unwrap_or(0);
-
                 log::debug!(
                     "[VERIFY] ✓ {} -> {}: score={:.2}, overlap_len={}",
                     suffix_idx,
@@ -244,9 +239,10 @@ fn create_overlap_graph_from_trie(
                     overlap_len
                 );
 
-                if score > prev_score || (score == prev_score && overlap_len > prev_span) {
-                    best_scores.insert(key, score);
-                    best_spans.insert(key, overlap_len);
+                let row = &mut per_source[*suffix_idx];
+                let prev = row.get(prefix_idx).copied().unwrap_or((f32::MIN, 0));
+                if score > prev.0 || (score == prev.0 && overlap_len > prev.1) {
+                    row.insert(*prefix_idx, (score, overlap_len));
                 }
             } else {
                 log::debug!(
@@ -256,8 +252,7 @@ fn create_overlap_graph_from_trie(
                 );
             }
         }
-        (best_scores, best_spans)
-    };
+    }
 
     // Convert to CSR sparse matrices
     let mut a_indptr: Vec<usize> = Vec::with_capacity(n + 1);
@@ -271,15 +266,10 @@ fn create_overlap_graph_from_trie(
     o_indptr.push(0);
 
     for src_idx in 0..n {
-        let mut edges: Vec<(usize, f32)> = best_scores
+        // Collect outgoing edges from the per-row map
+        let mut edges: Vec<(usize, f32)> = per_source[src_idx]
             .iter()
-            .filter_map(|((src, dst), &score)| {
-                if *src == src_idx {
-                    Some((*dst, score))
-                } else {
-                    None
-                }
-            })
+            .map(|(&dst, &(score, _span))| (dst, score))
             .collect();
 
         let edges_before = edges.len();
@@ -315,7 +305,11 @@ fn create_overlap_graph_from_trie(
         edges.sort_by_key(|(dst, _)| *dst);
 
         for (dst, score) in edges {
-            let overlap_len = best_spans.get(&(src_idx, dst)).copied().unwrap_or(0);
+            let overlap_len = per_source[src_idx]
+                .get(&dst)
+                .copied()
+                .map(|(_s, span)| span)
+                .unwrap_or(0);
             a_indices.push(dst);
             a_data.push(score as usize);
             o_indices.push(dst);
