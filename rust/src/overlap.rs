@@ -7,9 +7,6 @@ use strsim::damerau_levenshtein;
 
 use crate::affix::PrunedAffixTrie;
 
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-
 /// Mapping from source read index to weighted successor indices.
 pub type Adjacency = Vec<HashMap<usize, usize>>;
 
