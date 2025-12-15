@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use strsim::damerau_levenshtein;
 
 /// A key representing an affix as a slice reference into a read.
 pub type AffixSlice = (usize, usize, usize); // (read_idx, start, end)
@@ -651,6 +652,75 @@ impl PrunedAffixTrie {
         }
 
         candidates
+    }
+
+    /// Generate verified overlap candidates by running a lightweight verification
+    /// for each raw candidate. This avoids the caller having to re-run verification
+    /// and allows the trie to provide pre-scored edges.
+    ///
+    /// This is a simplified verifier intended to match the overlap scoring in
+    /// `overlap.rs`. It accepts `max_diff` and `min_suffix_len` to control
+    /// acceptance thresholds. Returns Vec<(src, dst, score, span)>.
+    pub fn overlap_verified_candidates_simple(
+        &self,
+        reads: &[String],
+        max_diff: f32,
+        min_suffix_len: usize,
+    ) -> Vec<(usize, usize, f32, usize)> {
+        let raw = self.overlap_candidates(reads);
+        let mut best: HashMap<(usize, usize), (f32, usize)> = HashMap::new();
+
+        for (suf_idx, pre_idx, shared_affix) in raw {
+            let suffix_read = &reads[suf_idx];
+            let prefix_read = &reads[pre_idx];
+
+            let anchor_len = shared_affix.len();
+            let min_len = min_suffix_len.max(1);
+            let max_span = suffix_read.len().min(prefix_read.len());
+
+            // Start span at anchor or min_len, extend a little around anchor
+            let start_span = anchor_len.max(min_len);
+            let end_span = max_span.min(start_span + 20);
+
+            let mut best_score = f32::MIN;
+            let mut best_overlap = 0usize;
+
+            for span in start_span..=end_span {
+                if span > suffix_read.len() || span > prefix_read.len() {
+                    break;
+                }
+                let suffix_window = &suffix_read[suffix_read.len() - span..];
+                let prefix_window = &prefix_read[..span];
+
+                let distance = damerau_levenshtein(suffix_window, prefix_window);
+                let float_diff = distance as f32 / span as f32;
+
+                if float_diff <= max_diff {
+                    let error_rate = distance as f32 / span as f32;
+                    let quality_factor = (1.0 - error_rate).powf(2.0);
+                    let score = span as f32 * quality_factor;
+                    if score > best_score || (score == best_score && span > best_overlap) {
+                        best_score = score;
+                        best_overlap = span;
+                    }
+                } else if span > anchor_len + 5 {
+                    break;
+                }
+            }
+
+            if best_score > f32::MIN {
+                let key = (suf_idx, pre_idx);
+                let prev = best.get(&key).copied().unwrap_or((f32::MIN, 0));
+                if best_score > prev.0 || (best_score == prev.0 && best_overlap > prev.1) {
+                    best.insert(key, (best_score, best_overlap));
+                }
+            }
+        }
+
+        // Convert map to vector
+        best.into_iter()
+            .map(|((s, p), (score, span))| (s, p, score, span))
+            .collect()
     }
 
     /// Iterate canonical affix sequences with their contributing read indices.

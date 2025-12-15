@@ -156,102 +156,109 @@ fn create_overlap_graph_from_trie(
 
     let n = reads.len();
     // Trie now includes fuzzy matches in extension vectors automatically
-    log::info!("Collecting overlap candidates from trie...");
-    let candidates = affix_trie.overlap_candidates(reads);
-    log::info!("Found {} candidate pairs", candidates.len());
+    log::info!("Collecting & verifying candidates from trie...");
+    // Use the trie-side verified candidate emitter (simple verifier)
+    let verified = affix_trie.overlap_verified_candidates_simple(
+        reads,
+        config.max_diff,
+        config.min_suffix_len,
+    );
+    log::info!("Found {} verified edges", verified.len());
 
-    // Debug: log all candidates
-    for (suffix_idx, prefix_idx, shared_affix) in &candidates {
+    // Debug: log all verified edges
+    for (suffix_idx, prefix_idx, score, span) in &verified {
         log::debug!(
-            "[CANDIDATE] {} -> {} (shared_affix: '{}')",
+            "[VERIFIED] {} -> {}: score={:.2}, span={} ",
             suffix_idx,
             prefix_idx,
-            shared_affix
+            score,
+            span
         );
     }
 
-    // Build best scores and spans for each read pair
-    log::info!("Verifying {} candidates...", candidates.len());
+    // Build from verified tuples
 
-    // Per-source row maps: map dst -> (score, span)
+    // Build per-source rows from verified tuples
+    #[cfg(feature = "parallel")]
     let mut per_source: Vec<HashMap<usize, (f32, usize)>> =
         (0..n).map(|_| HashMap::new()).collect();
 
     #[cfg(feature = "parallel")]
     {
-        // Parallel verification producing thread-local maps keyed by (src,dst),
-        // then merge into per_source to avoid a giant global tuple-key map.
-        let local_results: Vec<HashMap<(usize, usize), (f32, usize)>> = candidates
-            .par_iter()
-            .fold(
-                || HashMap::new(),
-                |mut local_map, (suffix_idx, prefix_idx, shared_affix)| {
-                    let suffix_read = &reads[*suffix_idx];
-                    let prefix_read = &reads[*prefix_idx];
-
-                    if let Some((score, overlap_len)) =
-                        verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config)
-                    {
-                        let key = (*suffix_idx, *prefix_idx);
-                        let entry = local_map.entry(key).or_insert((f32::MIN, 0));
-                        if score > entry.0 || (score == entry.0 && overlap_len > entry.1) {
-                            *entry = (score, overlap_len);
-                        }
-                    }
-                    local_map
-                },
-            )
-            .collect();
-
-        // Merge thread-local results into per_source rows
-        for local_map in local_results {
-            for ((src, dst), (score, span)) in local_map {
-                let row = &mut per_source[src];
-                let prev = row.get(&dst).copied().unwrap_or((f32::MIN, 0));
-                if score > prev.0 || (score == prev.0 && span > prev.1) {
-                    row.insert(dst, (score, span));
-                }
+        for (s, d, score, span) in &verified {
+            let row = &mut per_source[*s];
+            let prev = row.get(d).copied().unwrap_or((f32::MIN, 0));
+            if *score > prev.0 || (*score == prev.0 && *span > prev.1) {
+                row.insert(*d, (*score, *span));
             }
         }
     }
 
     #[cfg(not(feature = "parallel"))]
     {
-        for (suffix_idx, prefix_idx, shared_affix) in &candidates {
-            let suffix_read = &reads[*suffix_idx];
-            let prefix_read = &reads[*prefix_idx];
+        // Streaming emission from verified tuples grouped by source
+        log::info!(
+            "Streaming CSR emission from {} verified edges...",
+            verified.len()
+        );
 
-            log::debug!(
-                "[VERIFY] Candidate {} -> {} (anchor: {})",
-                suffix_idx,
-                prefix_idx,
-                shared_affix
-            );
+        // Prepare CSR buffers and build directly from grouped verified tuples
+        let mut a_indptr: Vec<usize> = Vec::with_capacity(n + 1);
+        let mut a_indices: Vec<usize> = Vec::new();
+        let mut a_data: Vec<usize> = Vec::new();
+        let mut o_indptr: Vec<usize> = Vec::with_capacity(n + 1);
+        let mut o_indices: Vec<usize> = Vec::new();
+        let mut o_data: Vec<usize> = Vec::new();
 
-            if let Some((score, overlap_len)) =
-                verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config)
-            {
-                log::debug!(
-                    "[VERIFY] ✓ {} -> {}: score={:.2}, overlap_len={}",
-                    suffix_idx,
-                    prefix_idx,
-                    score,
-                    overlap_len
-                );
+        a_indptr.push(0);
+        o_indptr.push(0);
 
-                let row = &mut per_source[*suffix_idx];
-                let prev = row.get(prefix_idx).copied().unwrap_or((f32::MIN, 0));
-                if score > prev.0 || (score == prev.0 && overlap_len > prev.1) {
-                    row.insert(*prefix_idx, (score, overlap_len));
+        // Sort verified tuples by source
+        let mut verified_sorted = verified.clone();
+        verified_sorted.sort_by_key(|(s, _d, _score, _span)| *s);
+
+        let mut i = 0usize;
+        while i < verified_sorted.len() {
+            let src = verified_sorted[i].0;
+            // collect best per-dst for this src
+            let mut row_map: HashMap<usize, (f32, usize)> = HashMap::new();
+            while i < verified_sorted.len() && verified_sorted[i].0 == src {
+                let (s, d, score, span) = verified_sorted[i];
+                let prev = row_map.get(&d).copied().unwrap_or((f32::MIN, 0));
+                if score > prev.0 || (score == prev.0 && span > prev.1) {
+                    row_map.insert(d, (score, span));
                 }
-            } else {
-                log::debug!(
-                    "[VERIFY] ✗ {} -> {}: rejected (max_diff or min_suffix_len)",
-                    suffix_idx,
-                    prefix_idx
-                );
+                i += 1;
             }
+
+            // Convert to edge list and apply knee-detection
+            let mut edges: Vec<(usize, f32)> =
+                row_map.iter().map(|(&dst, &(sco, _))| (dst, sco)).collect();
+            let edges_before = edges.len();
+            if config.detect_score_cliff && !edges.is_empty() {
+                edges.sort_by(|(_, s1), (_, s2)| s2.partial_cmp(s1).unwrap());
+                let scores: Vec<f32> = edges.iter().map(|(_, s)| *s).collect();
+                let knee_idx = detect_knee_point(&scores);
+                edges.truncate(knee_idx + 1);
+            }
+            edges.sort_by_key(|(dst, _)| *dst);
+
+            for (dst, score) in edges {
+                let span = row_map.get(&dst).copied().map(|(_s, sp)| sp).unwrap_or(0);
+                a_indices.push(dst);
+                a_data.push(score as usize);
+                o_indices.push(dst);
+                o_data.push(span);
+            }
+
+            a_indptr.push(a_indices.len());
+            o_indptr.push(o_indices.len());
         }
+
+        let adjacency = CsMat::new((n, n), a_indptr, a_indices, a_data);
+        let overlaps = CsMat::new((n, n), o_indptr, o_indices, o_data);
+
+        return (adjacency, overlaps);
     }
 
     // Convert to CSR sparse matrices
