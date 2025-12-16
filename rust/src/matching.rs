@@ -12,6 +12,7 @@ use sprs::{indexing::SpIndex, CsMat, TriMat};
 use lapjv::lapjv;
 
 use crate::overlap::Adjacency;
+use crate::read_source::ReadSource;
 use log::debug;
 
 // Removed duplicate private argmin_index
@@ -263,15 +264,15 @@ pub fn find_first_subdiagonal_path(
             if col_sum_val != 0 {
                 start = argmin_index(&row_sums).unwrap_or(start);
             }
-            start = start.min(reads.len().saturating_sub(1));
-            let mut path = Vec::with_capacity(reads.len());
-            let mut visited = HashSet::with_capacity(reads.len());
+            start = start.min(n.saturating_sub(1));
+            let mut path = Vec::with_capacity(n);
+            let mut visited = HashSet::with_capacity(n);
             path.push(start);
             visited.insert(start);
             let overlap_csr = overlap_csc.to_csr();
             let mut current = start;
             let mut tried_for_node: HashMap<usize, HashSet<usize>> = HashMap::new();
-            while visited.len() < reads.len() {
+            while visited.len() < n {
                 let tried = tried_for_node.entry(current).or_insert_with(HashSet::new);
                 let mut best: Option<(usize, usize, usize)> = None;
                 if let Some(row_vec) = csr.outer_view(current) {
@@ -322,9 +323,8 @@ pub fn find_first_subdiagonal_path(
                 }
             }
             if visited.len() < reads.len() {
-                let mut remaining: Vec<usize> = (0..reads.len())
-                    .filter(|idx| !visited.contains(idx))
-                    .collect();
+                let mut remaining: Vec<usize> =
+                    (0..n).filter(|idx| !visited.contains(idx)).collect();
                 remaining.sort_by_key(|idx| col_sums.get(*idx).copied().unwrap_or(usize::MAX));
                 for idx in remaining {
                     path.push(idx);
@@ -390,6 +390,191 @@ pub fn find_first_subdiagonal_path(
     String::from_utf8(sequence)
         .map(|s| (s, path))
         .expect("assembled sequence should be valid UTF-8")
+}
+
+/// Compute assembly path (index order) from matrices without depending on in-memory reads.
+pub fn compute_assembly_path(matrix: &CsMat<usize>, overlap_csc: &CsMat<usize>) -> Vec<usize> {
+    use ndarray::Array2;
+    let n = matrix.rows();
+    let mut cost_matrix = Array2::<f64>::zeros((n, n));
+    for i in 0..n {
+        for j in 0..n {
+            let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
+            cost_matrix[(i, j)] = -score;
+        }
+    }
+
+    if let Ok((assignment_vec, _col_assignments)) = lapjv(&cost_matrix) {
+        let mut assigned = vec![false; n];
+        let mut path = Vec::with_capacity(n);
+        let mut assigned_to: Vec<Option<usize>> = vec![None; n];
+        for (i, &j) in assignment_vec.iter().enumerate() {
+            assigned_to[j] = Some(i);
+        }
+        let mut start = None;
+        for i in 0..n {
+            if assigned_to[i].is_none() {
+                start = Some(i);
+                break;
+            }
+        }
+        let mut current = match start {
+            Some(idx) if idx < n => idx,
+            _ => 0,
+        };
+        for _ in 0..n {
+            if assigned[current] {
+                break;
+            }
+            path.push(current);
+            assigned[current] = true;
+            let next = assignment_vec[current];
+            if assigned[next] {
+                break;
+            }
+            current = next;
+        }
+        while assigned.iter().any(|&v| !v) {
+            let next_start = assigned.iter().position(|&v| !v).unwrap_or(0);
+            let mut current = next_start;
+            for _ in 0..n {
+                if assigned[current] {
+                    break;
+                }
+                path.push(current);
+                assigned[current] = true;
+                let next = assignment_vec[current];
+                if assigned[next] {
+                    break;
+                }
+                current = next;
+            }
+        }
+        return path;
+    }
+
+    // Fallback greedy
+    let csr = matrix.to_csr();
+    let csc = matrix.to_csc();
+    let (row_count, _) = csr.shape();
+    let mut col_sums = vec![0usize; row_count];
+    for (col_idx, col_vec) in csc.outer_iterator().enumerate() {
+        let sum: usize = col_vec.data().iter().copied().sum();
+        col_sums[col_idx] = sum;
+    }
+    let mut row_sums = vec![0usize; row_count];
+    for (row_idx, row_vec) in csr.outer_iterator().enumerate() {
+        row_sums[row_idx] = row_vec.data().iter().copied().sum();
+    }
+    let mut start = argmin_index(&col_sums).unwrap_or(0);
+    let col_sum_val = if start < col_sums.len() {
+        col_sums[start]
+    } else {
+        0
+    };
+    if col_sum_val != 0 {
+        start = argmin_index(&row_sums).unwrap_or(start);
+    }
+    start = start.min(n.saturating_sub(1));
+    let mut path = Vec::with_capacity(n);
+    let mut visited = HashSet::with_capacity(n);
+    path.push(start);
+    visited.insert(start);
+    let overlap_csr = overlap_csc.to_csr();
+    let mut current = start;
+    let mut tried_for_node: HashMap<usize, HashSet<usize>> = HashMap::new();
+    while visited.len() < n {
+        let tried = tried_for_node.entry(current).or_insert_with(HashSet::new);
+        let mut best: Option<(usize, usize, usize)> = None;
+        if let Some(row_vec) = csr.outer_view(current) {
+            for (col_idx, &weight) in row_vec.indices().iter().zip(row_vec.data().iter()) {
+                let target = *col_idx;
+                if tried.contains(&target) || visited.contains(&target) {
+                    continue;
+                }
+                let overlap = overlap_csr
+                    .get(current, target)
+                    .copied()
+                    .unwrap_or_default();
+                match best {
+                    None => best = Some((target, weight, overlap)),
+                    Some((bt, bw, bo)) => {
+                        if weight > bw
+                            || (weight == bw && overlap > bo)
+                            || (weight == bw && overlap == bo && target < bt)
+                        {
+                            best = Some((target, weight, overlap));
+                        }
+                    }
+                }
+            }
+        }
+        match best.map(|(t, _, _)| t) {
+            Some(next) => {
+                let is_backward = path.contains(&next) && path.last() != Some(&next);
+                if is_backward {
+                    if is_swap_square(current, next, &csc) {
+                        path.push(next);
+                        visited.insert(next);
+                        current = next;
+                    } else {
+                        tried.insert(next);
+                        continue;
+                    }
+                } else {
+                    path.push(next);
+                    visited.insert(next);
+                    current = next;
+                }
+            }
+            None => break,
+        }
+    }
+    if visited.len() < n {
+        let mut remaining: Vec<usize> = (0..n).filter(|idx| !visited.contains(idx)).collect();
+        remaining.sort_by_key(|idx| col_sums.get(*idx).copied().unwrap_or(usize::MAX));
+        for idx in remaining {
+            path.push(idx);
+        }
+    }
+    path
+}
+
+/// Assemble sequence and return (assembled_string, path) using a `ReadSource` for read access.
+pub fn find_first_subdiagonal_path_from_readsource<R: ReadSource + ?Sized>(
+    matrix: &CsMat<usize>,
+    overlap_csc: &CsMat<usize>,
+    reads_src: &R,
+    _read_ids: &[String],
+    _qualities: Option<&[Vec<i32>]>,
+) -> (String, Vec<usize>) {
+    let path = compute_assembly_path(matrix, overlap_csc);
+    if path.is_empty() {
+        return (String::new(), path);
+    }
+    let mut sequence: Vec<u8> = Vec::new();
+    match reads_src.get_seq(path[0]) {
+        Ok(s) => sequence.extend_from_slice(s.as_bytes()),
+        Err(_) => return (String::new(), path),
+    }
+    for window in path.windows(2) {
+        let prev = window[0];
+        let next = window[1];
+        let overlap_len = overlap_csc.get(prev, next).copied().unwrap_or(0) as usize;
+        let prev_len = reads_src.get_len(prev).unwrap_or(0);
+        let next_len = reads_src.get_len(next).unwrap_or(0);
+        let overlap_len = overlap_len.min(prev_len).min(next_len);
+        if overlap_len < next_len {
+            match reads_src.get_seq(next) {
+                Ok(s) => {
+                    let slice = &s[overlap_len..];
+                    sequence.extend_from_slice(slice.as_bytes());
+                }
+                Err(_) => return (String::new(), path),
+            }
+        }
+    }
+    (String::from_utf8(sequence).unwrap_or_default(), path)
 }
 
 /// Detect cycles (SCCs) in adjacency represented as Vec<HashMap<usize,usize>>.

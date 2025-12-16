@@ -11,7 +11,10 @@ use bio::io::{fasta, fastq};
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
 
-use sequitur::{create_overlap_graph_unified, find_first_subdiagonal_path, OverlapConfig};
+use sequitur::{
+    create_overlap_graph_unified, create_overlap_graph_unified_from_readsource,
+    find_first_subdiagonal_path, OverlapConfig,
+};
 
 /// Sequitur Rust CLI (prototype)
 #[derive(Parser, Debug)]
@@ -94,6 +97,10 @@ struct Args {
     #[arg(long, default_value_t = sequitur::DEFAULT_MIN_SUFFIX_LEN)]
     min_suffix_len: usize,
 
+    /// Optional path to a prebuilt read index (.seqs/.sidx.json) to use for read access
+    #[arg(long)]
+    read_index: Option<String>,
+
     /// Exponent for error penalty in quality-adjusted scoring (1.0=linear, 2.0=quadratic)
     #[arg(long, default_value_t = 2.0)]
     error_penalty_exponent: f32,
@@ -140,6 +147,7 @@ fn main() {
         args.use_array,
         args.max_diff,
         args.min_suffix_len,
+        args.read_index.as_deref(),
         args.export_read_map.as_deref(),
         args.error_penalty_exponent,
     ) {
@@ -305,6 +313,7 @@ fn run_pipeline(
     use_array: bool,
     max_diff_cli: f32,
     min_suffix_len_cli: usize,
+    read_index: Option<&str>,
     export_read_map: Option<&str>,
     error_penalty_exponent: f32,
 ) -> Result<String> {
@@ -397,7 +406,73 @@ fn run_pipeline(
         info!("Score-cliff detection enabled: will remove low-quality overlaps using knee-point analysis");
     }
     info!("Creating overlap graph (unified)...");
-    let (mut adjacency_matrix, overlap_matrix) = create_overlap_graph_unified(&reads, config);
+    // If a read index was provided, prefer using it for overlap construction.
+    let (mut adjacency_matrix, overlap_matrix) = if let Some(index_path) = read_index {
+        // Attempt to open index and use ReadSource-based path. If successful,
+        // swap the in-memory `reads` and `read_ids` with the materialized
+        // sequences from the index so indices align with the adjacency.
+        // If the index files don't yet exist, build them from `reads1` and `reads2`.
+        let idx_base = std::path::Path::new(index_path);
+        let seqs_path = idx_base.with_extension("seqs");
+        let sidx_path = seqs_path.with_extension("sidx.json");
+        if !seqs_path.exists() || !sidx_path.exists() {
+            info!("Index files not found for {index_path}, building index from inputs");
+            sequitur::read_source::build_index_from_pair(
+                std::path::Path::new(reads1_path),
+                std::path::Path::new(reads2_path),
+                idx_base,
+                no_revcomp,
+            )
+            .map_err(|e| anyhow!("Failed to build read index: {:?}", e))?;
+        }
+
+        match sequitur::read_source::BinaryIndexReadSource::open(index_path) {
+            Ok(idx_src) => {
+                let (adj, overlaps, mut mat_reads, mut mat_names) =
+                    create_overlap_graph_unified_from_readsource(&idx_src, config);
+                // If the CLI would have reverse-complemented reads2, apply the same
+                // transformation to the indexed materialization so ordering/orientation
+                // match the in-memory pipeline.
+                if !no_revcomp {
+                    // reads1_count/read2_count were computed from the original file reads
+                    let start = reads1_count;
+                    let end = reads1_count + reads2_count;
+                    if end <= mat_reads.len() {
+                        let tail: Vec<String> = mat_reads[start..end].to_vec();
+                        match reverse_complement_all(tail) {
+                            Ok(rc_tail) => {
+                                for (i, v) in rc_tail.into_iter().enumerate() {
+                                    mat_reads[start + i] = v;
+                                }
+                                for i in start..end {
+                                    if let Some(nm) = mat_names.get_mut(i) {
+                                        *nm = format!("{}/RC", nm.clone());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to reverse-complement indexed reads: {:?}", e);
+                            }
+                        }
+                    }
+                }
+                // Replace in-memory reads/read_ids with indexed ordering
+                reads = mat_reads;
+                read_ids = mat_names;
+                (adj, overlaps)
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to open read index {:?}, falling back to in-memory: {:?}",
+                    index_path,
+                    e
+                );
+                create_overlap_graph_unified(&reads, config)
+            }
+        }
+    } else {
+        create_overlap_graph_unified(&reads, config)
+    };
 
     info!("Overlap graph created.");
 
@@ -611,6 +686,7 @@ mod smoke {
             false, // use_array
             0.25,
             sequitur::DEFAULT_MIN_SUFFIX_LEN,
+            None, // read_index
             None, // export_read_map
             2.0,  // error_penalty_exponent
         );

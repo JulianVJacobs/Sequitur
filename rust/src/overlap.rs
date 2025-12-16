@@ -6,6 +6,7 @@ use sprs::CsMat;
 use strsim::damerau_levenshtein;
 
 use crate::affix::PrunedAffixTrie;
+use crate::read_source::ReadSource;
 
 /// Mapping from source read index to weighted successor indices.
 pub type Adjacency = Vec<HashMap<usize, usize>>;
@@ -137,6 +138,23 @@ pub fn create_overlap_graph_unified<'a>(
     let min_suffix_len = config.min_suffix_len.max(1);
     let trie = PrunedAffixTrie::build(reads, min_suffix_len, config.max_diff);
     create_overlap_graph_from_trie(reads, &trie, config)
+}
+
+/// Variant of unified overlap graph builder that accepts any `ReadSource`.
+///
+/// This convenience API uses `PrunedAffixTrie::build_from_readsource` to
+/// construct the trie and (for now) materializes reads into `Vec<String>` to
+/// reuse the existing trie-based pipeline. Future work may avoid full
+/// materialization.
+pub fn create_overlap_graph_unified_from_readsource<R: ReadSource + ?Sized>(
+    reads: &R,
+    config: OverlapConfig,
+) -> (CsMat<usize>, CsMat<usize>, Vec<String>, Vec<String>) {
+    let min_suffix_len = config.min_suffix_len.max(1);
+    let (trie, mat_reads, mat_names) =
+        PrunedAffixTrie::build_from_readsource(reads, min_suffix_len, config.max_diff);
+    let (adj, overlaps) = create_overlap_graph_from_trie(&mat_reads, &trie, config);
+    (adj, overlaps, mat_reads, mat_names)
 }
 
 /// Build overlap graph from trie implementation (optimized).

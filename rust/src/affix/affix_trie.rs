@@ -6,6 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::read_source::ReadSource;
+
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use strsim::damerau_levenshtein;
@@ -152,6 +154,35 @@ pub struct PrunedAffixTrie {
 }
 
 impl PrunedAffixTrie {
+    /// Build a pruned and compressed affix trie from a `ReadSource`.
+    ///
+    /// This is a convenience shim that materializes reads into a temporary
+    /// Vec<String> and calls the existing `build(&[String])` implementation.
+    ///
+    /// It allows code that already has a `ReadSource` to reuse the current
+    /// trie-building logic without a large refactor. A later change will
+    /// implement a fully streaming trie build that avoids loading all reads.
+    pub fn build_from_readsource<R: ReadSource + ?Sized>(
+        reads: &R,
+        min_k: usize,
+        max_diff: f32,
+    ) -> (Self, Vec<String>, Vec<String>) {
+        let n = reads.num_reads().unwrap_or(0);
+        let mut v: Vec<String> = Vec::with_capacity(n);
+        let mut names: Vec<String> = Vec::with_capacity(n);
+        for i in 0..n {
+            match reads.get_seq(i) {
+                Ok(cow) => v.push(cow.into_owned()),
+                Err(_) => v.push(String::new()),
+            }
+            match reads.get_name(i) {
+                Ok(Some(nm)) => names.push(nm),
+                _ => names.push(format!("read{}", i)),
+            }
+        }
+        let trie = Self::build(&v, min_k, max_diff);
+        (trie, v, names)
+    }
     /// Build a pruned and compressed affix trie from reads with fuzzy k-mer matching.
     pub fn build(reads: &[String], min_k: usize, max_diff: f32) -> Self {
         log::info!(
