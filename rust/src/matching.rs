@@ -13,9 +13,7 @@ use lapjv::lapjv;
 
 use crate::overlap::Adjacency;
 use crate::read_source::ReadSource;
-use log::debug;
 
-// Removed duplicate private argmin_index
 pub fn argmin_index(values: &[usize]) -> Option<usize> {
     values
         .iter()
@@ -102,36 +100,8 @@ pub fn relabel_rows(matrix: &mut TriMat<usize>, rows_map: &HashMap<usize, usize>
 }
 
 /// Validate that every edge in the assembly path exists in the cost matrix.
-fn validate_assembly_path(
-    path: &[usize],
-    cost_matrix: &ndarray::Array2<f64>,
-    read_ids: &[String],
-) -> Option<String> {
-    for i in 0..path.len() - 1 {
-        let from = path[i];
-        let to = path[i + 1];
-        let cost = cost_matrix[(from, to)];
-
-        if cost.is_infinite() {
-            return Some(format!(
-                "INVALID: path contains edge {} -> {} ({} -> {}) with cost INF",
-                from,
-                to,
-                if from < read_ids.len() {
-                    &read_ids[from]
-                } else {
-                    "OOB"
-                },
-                if to < read_ids.len() {
-                    &read_ids[to]
-                } else {
-                    "OOB"
-                }
-            ));
-        }
-    }
-    None
-}
+// `validate_assembly_path` was removed — path validation is performed inline
+// where needed by the LAPJV-based path reconstruction.
 
 /// Placeholder for the subdiagonal traversal; not yet ported from Python.
 pub fn find_first_subdiagonal_path(
@@ -139,257 +109,14 @@ pub fn find_first_subdiagonal_path(
     overlap_csc: &CsMat<usize>,
     reads: &[String],
     read_ids: &[String],
-    _qualities: Option<&[Vec<i32>]>,
+    qualities: Option<&[Vec<i32>]>,
 ) -> (String, Vec<usize>) {
-    // Build cost matrix from quality-adjusted scores in adjacency matrix
-    use ndarray::Array2;
-    let n = matrix.rows();
-    let mut cost_matrix = Array2::<f64>::zeros((n, n));
-    for i in 0..n {
-        for j in 0..n {
-            // Use quality-adjusted score from adjacency matrix (has error penalty applied)
-            let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
-            cost_matrix[(i, j)] = -score
-        }
-    }
-    debug!("[DEBUG] Cost matrix for lapjv assignment:");
-    for i in 0..n {
-        let row: Vec<f64> = (0..n).map(|j| cost_matrix[(i, j)]).collect();
-        debug!("  row {}: {:?}", i, row);
-    }
-    let path = match lapjv(&cost_matrix) {
-        Ok((assignment_vec, col_assignments)) => {
-            debug!("[DEBUG] lapjv Assignment vector: {:?}", assignment_vec);
-            debug!("[DEBUG] lapjv Col assignments: {:?}", col_assignments);
-            debug!("[DEBUG] lapjv Assignment selected costs:");
-            for (i, &j) in assignment_vec.iter().enumerate() {
-                let cost = cost_matrix[(i, j)];
-                debug!("  row {} -> col {} : {}", i, j, cost);
-            }
-            // Reconstruct path by following assignment links from a true start node
-            let mut assigned = vec![false; n];
-            let mut path = Vec::with_capacity(n);
-            // Find a start node (not assigned to by any other)
-            let mut assigned_to: Vec<Option<usize>> = vec![None; n];
-            for (i, &j) in assignment_vec.iter().enumerate() {
-                assigned_to[j] = Some(i);
-            }
-            let mut start = None;
-            for i in 0..n {
-                if assigned_to[i].is_none() {
-                    start = Some(i);
-                    break;
-                }
-            }
-            let mut current = match start {
-                Some(idx) if idx < n => idx,
-                _ => 0,
-            };
-            // Walk the primary component starting from the chosen start
-            for _ in 0..n {
-                if assigned[current] {
-                    break;
-                }
-                path.push(current);
-                assigned[current] = true;
-                let next = assignment_vec[current];
-                if assigned[next] {
-                    break;
-                }
-                current = next;
-            }
-
-            // Walk any remaining components separately to avoid fabricating edges
-            while assigned.iter().any(|&v| !v) {
-                // pick the lowest-index unvisited node as a new component start
-                let next_start = assigned.iter().position(|&v| !v).unwrap_or(0);
-                let mut current = next_start;
-                for _ in 0..n {
-                    if assigned[current] {
-                        break;
-                    }
-                    path.push(current);
-                    assigned[current] = true;
-                    let next = assignment_vec[current];
-                    if assigned[next] {
-                        break;
-                    }
-                    current = next;
-                }
-            }
-            debug!(
-                "[DEBUG] lapjv Assignment reconstructed path (indices): {:?}",
-                path
-            );
-            // Validate path against cost matrix
-            if let Some(violation) = validate_assembly_path(&path, &cost_matrix, read_ids) {
-                log::warn!("[PATH_VALIDATION] {}", violation);
-            }
-            debug!("[DEBUG] Overlap scores along lapjv assignment path:");
-            let mut total_weight = 0;
-            for w in path.windows(2) {
-                let i = w[0];
-                let j = w[1];
-                let score = matrix.get(i, j).copied().unwrap_or(0);
-                debug!("  {} -> {} : {}", i, j, score);
-                total_weight += score;
-            }
-            debug!("[DEBUG] Total path weight: {}", total_weight);
-            path
-        }
-        Err(e) => {
-            log::info!(
-                "[LAPJV] Assignment failed: {:?}. Falling back to greedy assembly.",
-                e
-            );
-            // Fallback to greedy path if assignment fails
-            let csr = matrix.to_csr();
-            let csc = matrix.to_csc();
-            let (row_count, _) = csr.shape();
-            let mut col_sums = vec![0usize; row_count];
-            for (col_idx, col_vec) in csc.outer_iterator().enumerate() {
-                let sum: usize = col_vec.data().iter().copied().sum();
-                col_sums[col_idx] = sum;
-            }
-            let mut row_sums = vec![0usize; row_count];
-            for (row_idx, row_vec) in csr.outer_iterator().enumerate() {
-                row_sums[row_idx] = row_vec.data().iter().copied().sum();
-            }
-            let mut start = argmin_index(&col_sums).unwrap_or(0);
-            let col_sum_val = if start < col_sums.len() {
-                col_sums[start]
-            } else {
-                0
-            };
-            if col_sum_val != 0 {
-                start = argmin_index(&row_sums).unwrap_or(start);
-            }
-            start = start.min(n.saturating_sub(1));
-            let mut path = Vec::with_capacity(n);
-            let mut visited = HashSet::with_capacity(n);
-            path.push(start);
-            visited.insert(start);
-            let overlap_csr = overlap_csc.to_csr();
-            let mut current = start;
-            let mut tried_for_node: HashMap<usize, HashSet<usize>> = HashMap::new();
-            while visited.len() < n {
-                let tried = tried_for_node.entry(current).or_insert_with(HashSet::new);
-                let mut best: Option<(usize, usize, usize)> = None;
-                if let Some(row_vec) = csr.outer_view(current) {
-                    for (col_idx, &weight) in row_vec.indices().iter().zip(row_vec.data().iter()) {
-                        let target = *col_idx;
-                        if tried.contains(&target) {
-                            continue;
-                        }
-                        if visited.contains(&target) {
-                            continue;
-                        }
-                        let overlap = overlap_csr
-                            .get(current, target)
-                            .copied()
-                            .unwrap_or_default();
-                        match best {
-                            None => best = Some((target, weight, overlap)),
-                            Some((bt, bw, bo)) => {
-                                if weight > bw
-                                    || (weight == bw && overlap > bo)
-                                    || (weight == bw && overlap == bo && target < bt)
-                                {
-                                    best = Some((target, weight, overlap));
-                                }
-                            }
-                        }
-                    }
-                }
-                match best.map(|(t, _, _)| t) {
-                    Some(next) => {
-                        let is_backward = path.contains(&next) && path.last() != Some(&next);
-                        if is_backward {
-                            if is_swap_square(current, next, &csc) {
-                                path.push(next);
-                                visited.insert(next);
-                                current = next;
-                            } else {
-                                tried.insert(next);
-                                continue;
-                            }
-                        } else {
-                            path.push(next);
-                            visited.insert(next);
-                            current = next;
-                        }
-                    }
-                    None => break,
-                }
-            }
-            if visited.len() < reads.len() {
-                let mut remaining: Vec<usize> =
-                    (0..n).filter(|idx| !visited.contains(idx)).collect();
-                remaining.sort_by_key(|idx| col_sums.get(*idx).copied().unwrap_or(usize::MAX));
-                for idx in remaining {
-                    path.push(idx);
-                }
-            }
-            // Debug: Print reconstructed path (fallback)
-            debug!("[DEBUG] Fallback reconstructed path (indices): {:?}", path);
-            debug!("[DEBUG] Overlap scores along fallback path:");
-            for w in path.windows(2) {
-                let i = w[0];
-                let j = w[1];
-                let score = matrix.get(i, j).copied().unwrap_or(0);
-                debug!("  {} -> {} : {}", i, j, score);
-            }
-            path
-        }
-    };
-
-    if path.is_empty() {
-        return (String::new(), Vec::new());
-    }
-
-    // Print the final sorted overlap matrix in path order (reordered for first subdiagonal)
-    debug!("[DEBUG] Final sorted overlap matrix (path order, reordered):");
-    let mut reordered_matrix = Vec::with_capacity(path.len());
-    for &row_idx in &path {
-        let mut row = Vec::with_capacity(path.len());
-        for &col_idx in &path {
-            let val = matrix.get(row_idx, col_idx).copied().unwrap_or(0);
-            row.push(val);
-        }
-        reordered_matrix.push(row);
-    }
-    for (i, row) in reordered_matrix.iter().enumerate() {
-        debug!("[DEBUG] path[{}] {}: {:?}", i, path[i], row);
-    }
-
-    let mut sequence: Vec<u8> = Vec::new();
-    sequence.extend_from_slice(reads[path[0]].as_bytes());
-
-    debug!("[DEBUG] Assembly path: {:?}", path);
-    for window in path.windows(2) {
-        let prev = window[0];
-        let next = window[1];
-        let overlap_len = overlap_csc.get(prev, next).copied().unwrap_or(0);
-        let overlap_len = overlap_len.min(reads[prev].len()).min(reads[next].len());
-        debug!(
-            "[DEBUG] Transition: {} -> {} | overlap_len: {}",
-            prev, next, overlap_len
-        );
-        debug!("[DEBUG] prev read [{}]: {}", prev, reads[prev]);
-        debug!("[DEBUG] next read [{}]: {}", next, reads[next]);
-        if overlap_len < reads[next].len() {
-            let slice = &reads[next][overlap_len..];
-            debug!(
-                "[DEBUG] Appending slice [{}][{}..]: {}",
-                next, overlap_len, slice
-            );
-            sequence.extend_from_slice(slice.as_bytes());
-        }
-    }
-
-    String::from_utf8(sequence)
-        .map(|s| (s, path))
-        .expect("assembled sequence should be valid UTF-8")
+    // Delegate to the ReadSource-backed implementation so callers that supply
+    // an in-memory `&[String]` continue to work while the core logic uses the
+    // disk-backed protocol (`ReadSource`) internally.
+    let inmem =
+        crate::read_source::InMemoryReadSource::new(reads.to_vec(), Some(read_ids.to_vec()));
+    find_first_subdiagonal_path_from_readsource(matrix, overlap_csc, &inmem, read_ids, qualities)
 }
 
 /// Compute assembly path (index order) from matrices without depending on in-memory reads.
