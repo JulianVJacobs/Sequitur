@@ -284,7 +284,11 @@ pub fn build_index_from_pair<P: AsRef<Path>>(
                     if is_reads2 && !no_revcomp {
                         seq = dna::revcomp(&seq);
                     }
-                    let name = rec.id().to_string();
+                    let name = if is_reads2 && !no_revcomp {
+                        format!("{}/RC", rec.id())
+                    } else {
+                        rec.id().to_string()
+                    };
                     write_seq_record(name, &seq)?;
                 }
                 Ok(())
@@ -302,7 +306,11 @@ pub fn build_index_from_pair<P: AsRef<Path>>(
                     if is_reads2 && !no_revcomp {
                         seq = dna::revcomp(&seq);
                     }
-                    let name = rec.id().to_string();
+                    let name = if is_reads2 && !no_revcomp {
+                        format!("{}/RC", rec.id())
+                    } else {
+                        rec.id().to_string()
+                    };
                     write_seq_record(name, &seq)?;
                 }
                 Ok(())

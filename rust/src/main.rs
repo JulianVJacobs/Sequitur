@@ -6,9 +6,8 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bio::alignment::distance::levenshtein;
-use bio::alphabets::dna;
 use bio::io::{fasta, fastq};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use flate2::read::MultiGzDecoder;
 
 use sequitur::{
@@ -19,7 +18,40 @@ use sequitur::{
 /// Sequitur Rust CLI (prototype)
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
+struct Cli {
+    /// Optional subcommand. If omitted, the CLI behaves like the previous flat interface (assemble).
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[command(flatten)]
+    assemble: AssembleArgs,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Build a read index from two read files and write the index base to `--output-index`
+    Index(IndexArgs),
+}
+
+#[derive(Parser, Debug)]
+struct IndexArgs {
+    /// FASTQ/FASTA file for read set 1
+    reads1: String,
+
+    /// FASTQ/FASTA file for read set 2 (reverse-complemented during ingest)
+    reads2: String,
+
+    /// Output base path for the index (will create `<base>.seqs` and `<base>.sidx.json`)
+    #[arg(long, required = true)]
+    output_index: String,
+
+    /// Skip reverse complement of reads2 when building the index
+    #[arg(long)]
+    no_revcomp: bool,
+}
+
+#[derive(Parser, Debug)]
+struct AssembleArgs {
     /// Optional NDJSON file (.jsonl) to export read index-to-sequence mapping
     #[arg(long)]
     export_read_map: Option<String>,
@@ -97,17 +129,42 @@ struct Args {
     #[arg(long, default_value_t = sequitur::DEFAULT_MIN_SUFFIX_LEN)]
     min_suffix_len: usize,
 
-    /// Optional path to a prebuilt read index (.seqs/.sidx.json) to use for read access
-    #[arg(long)]
-    read_index: Option<String>,
+    /// Optional path to a prebuilt read index (.seqs/.sidx.json) to use for read access.
+    /// If the flag is provided with no value, a temporary index will be created and
+    /// deleted after the run unless `--output-index` is also supplied (in which case
+    /// the index will be persisted to that path).
+    #[arg(long, num_args = 0..=1)]
+    read_index: Option<Option<String>>,
 
     /// Exponent for error penalty in quality-adjusted scoring (1.0=linear, 2.0=quadratic)
     #[arg(long, default_value_t = 2.0)]
     error_penalty_exponent: f32,
+    /// Optional output base path to persist an index when auto-building (`--output-index base`)
+    #[arg(long)]
+    output_index: Option<String>,
 }
 
 fn main() {
-    let args = Args::parse();
+    let cli = Cli::parse();
+    // If an explicit subcommand was supplied, handle it first.
+    if let Some(Commands::Index(idx)) = &cli.command {
+        // Call the library index builder and exit.
+        let idx_base = std::path::Path::new(&idx.output_index);
+        if let Err(e) = sequitur::read_source::build_index_from_pair(
+            std::path::Path::new(&idx.reads1),
+            std::path::Path::new(&idx.reads2),
+            idx_base,
+            idx.no_revcomp,
+        ) {
+            eprintln!("Failed to build read index: {:?}", e);
+            std::process::exit(1);
+        }
+        println!("Wrote index base: {}", idx.output_index);
+        std::process::exit(0);
+    }
+
+    // Default to assemble behavior when no subcommand is provided
+    let args = cli.assemble;
     // Set log level based on CLI flags
     let log_level = if args.trace {
         "trace"
@@ -130,6 +187,13 @@ fn main() {
         info!("reference: {}", refp);
     }
 
+    // Normalize the `--read-index` flag into `ReadIndexArg` (handled below by caller).
+    let read_index_mode = match &args.read_index {
+        None => ReadIndexArg::Absent,
+        Some(None) => ReadIndexArg::Temp,
+        Some(Some(s)) => ReadIndexArg::Base(s.clone()),
+    };
+
     if let Err(error) = run_pipeline(
         &args.reads1,
         &args.reads2,
@@ -147,7 +211,8 @@ fn main() {
         args.use_array,
         args.max_diff,
         args.min_suffix_len,
-        args.read_index.as_deref(),
+        read_index_mode,
+        args.output_index.as_deref(),
         args.export_read_map.as_deref(),
         args.error_penalty_exponent,
     ) {
@@ -271,16 +336,6 @@ fn read_sequences(path: &Path) -> Result<(Vec<String>, Vec<String>)> {
     }
 }
 
-fn reverse_complement_all(reads: Vec<String>) -> Result<Vec<String>> {
-    reads
-        .into_iter()
-        .map(|seq| {
-            let rc = dna::revcomp(seq.as_bytes());
-            String::from_utf8(rc).map_err(|_| anyhow!("Reverse complement produced invalid UTF-8"))
-        })
-        .collect()
-}
-
 fn load_reference(path: &Path) -> Result<Option<String>> {
     if !path.exists() {
         bail!("Reference path {} does not exist", path.display());
@@ -294,6 +349,13 @@ fn load_reference(path: &Path) -> Result<Option<String>> {
         combined.push_str(&seq);
     }
     Ok(Some(combined))
+}
+
+#[derive(Debug, Clone)]
+enum ReadIndexArg {
+    Absent,
+    Temp,
+    Base(String),
 }
 
 fn run_pipeline(
@@ -313,37 +375,46 @@ fn run_pipeline(
     use_array: bool,
     max_diff_cli: f32,
     min_suffix_len_cli: usize,
-    read_index: Option<&str>,
+    read_index: ReadIndexArg,
+    output_index: Option<&str>,
     export_read_map: Option<&str>,
     error_penalty_exponent: f32,
 ) -> Result<String> {
-    let (reads1, reads1_ids) = read_sequences(Path::new(reads1_path))
-        .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
-    let (reads2_raw, reads2_ids_raw) = read_sequences(Path::new(reads2_path))
-        .with_context(|| format!("Failed to parse reads from {}", reads2_path))?;
+    // If an index is requested (explicit base, temp request, or output_index supplied)
+    // avoid reading and reverse-complementing the reads into memory here to prevent
+    // double-orientation effects; the index-backed branch will materialize reads
+    // when needed. Otherwise load reads into memory as before.
+    let index_requested = !matches!(read_index, ReadIndexArg::Absent) || output_index.is_some();
 
-    let reads2 = if no_revcomp {
-        info!("Skipping reverse complement (--no-revcomp flag)");
-        reads2_raw
-    } else {
-        info!("Applying reverse complement to reads2");
-        reverse_complement_all(reads2_raw)?
-    };
+    let mut reads: Vec<String> = Vec::new();
+    let mut read_ids: Vec<String> = Vec::new();
+    let mut reads1_count: usize = 0;
+    let mut reads2_count: usize = 0;
 
-    // Combine read IDs with source annotation (only add /RC if actually reverse-complemented)
-    let reads2_ids: Vec<String> = reads2_ids_raw
-        .into_iter()
-        .map(|id| if no_revcomp { id } else { format!("{}/RC", id) })
-        .collect();
+    if !index_requested {
+        let (reads1, reads1_ids) = read_sequences(Path::new(reads1_path))
+            .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
+        let (reads2_raw, reads2_ids_raw) = read_sequences(Path::new(reads2_path))
+            .with_context(|| format!("Failed to parse reads from {}", reads2_path))?;
 
-    let reads1_count = reads1.len();
-    let reads2_count = reads2.len();
-    let mut reads = Vec::with_capacity(reads1_count + reads2_count);
-    let mut read_ids = Vec::with_capacity(reads1_count + reads2_count);
-    reads.extend(reads1.iter().cloned());
-    reads.extend(reads2.iter().cloned());
-    read_ids.extend(reads1_ids.iter().cloned());
-    read_ids.extend(reads2_ids.iter().cloned());
+        // In-memory path: do NOT reverse-complement reads2 here. The index builder
+        // is responsible for reverse-complementing reads2 when requested, and the
+        // pipeline will consume indexed materialization as-is. Keep in-memory reads
+        // in their original orientation to avoid double-RC confusion.
+        let reads2 = reads2_raw;
+
+        // Keep original read IDs (no "/RC" annotation) for in-memory mode.
+        let reads2_ids: Vec<String> = reads2_ids_raw;
+
+        reads1_count = reads1.len();
+        reads2_count = reads2.len();
+        reads = Vec::with_capacity(reads1_count + reads2_count);
+        read_ids = Vec::with_capacity(reads1_count + reads2_count);
+        reads.extend(reads1.iter().cloned());
+        reads.extend(reads2.iter().cloned());
+        read_ids.extend(reads1_ids.iter().cloned());
+        read_ids.extend(reads2_ids.iter().cloned());
+    }
 
     // Export read map as NDJSON if requested
     if let Some(json_path) = export_read_map {
@@ -406,72 +477,77 @@ fn run_pipeline(
         info!("Score-cliff detection enabled: will remove low-quality overlaps using knee-point analysis");
     }
     info!("Creating overlap graph (unified)...");
-    // If a read index was provided, prefer using it for overlap construction.
-    let (mut adjacency_matrix, overlap_matrix) = if let Some(index_path) = read_index {
-        // Attempt to open index and use ReadSource-based path. If successful,
-        // swap the in-memory `reads` and `read_ids` with the materialized
-        // sequences from the index so indices align with the adjacency.
-        // If the index files don't yet exist, build them from `reads1` and `reads2`.
-        let idx_base = std::path::Path::new(index_path);
-        let seqs_path = idx_base.with_extension("seqs");
-        let sidx_path = seqs_path.with_extension("sidx.json");
-        if !seqs_path.exists() || !sidx_path.exists() {
-            info!("Index files not found for {index_path}, building index from inputs");
-            sequitur::read_source::build_index_from_pair(
-                std::path::Path::new(reads1_path),
-                std::path::Path::new(reads2_path),
-                idx_base,
-                no_revcomp,
-            )
-            .map_err(|e| anyhow!("Failed to build read index: {:?}", e))?;
+    // Determine whether to use an on-disk index (either from `--read-index` or `--output-index`).
+    let (mut adjacency_matrix, overlap_matrix) = {
+        // `_temp_index_dir` will hold a TempDir when we auto-create a temporary index
+        // so that the directory (and files) live for the duration of this scope.
+        // Leading underscore suppresses unused-variable warnings while keeping it alive.
+        let mut _temp_index_dir: Option<tempfile::TempDir> = None;
+        // Choose a candidate base: prefer explicit `--read-index <base>`, otherwise
+        // `--output-index`. If `--read-index` was provided with no value, a temporary
+        // index will be created (unless `--output-index` is supplied, which causes
+        // the index to be persisted to that path per user preference).
+        let mut chosen_base: Option<std::path::PathBuf> = None;
+        match &read_index {
+            ReadIndexArg::Base(s) => chosen_base = Some(std::path::PathBuf::from(s.clone())),
+            ReadIndexArg::Temp => {
+                if let Some(o) = output_index {
+                    chosen_base = Some(std::path::PathBuf::from(o));
+                } else {
+                    let td = tempfile::tempdir()
+                        .map_err(|e| anyhow!("Failed to create tempdir: {:?}", e))?;
+                    let tmpbase = td.path().join("sequitur_index");
+                    info!("Building temporary index at {:?}", tmpbase);
+                    _temp_index_dir = Some(td);
+                    chosen_base = Some(tmpbase);
+                }
+            }
+            ReadIndexArg::Absent => {
+                if let Some(o) = output_index {
+                    chosen_base = Some(std::path::PathBuf::from(o));
+                }
+            }
         }
 
-        match sequitur::read_source::BinaryIndexReadSource::open(index_path) {
-            Ok(idx_src) => {
-                let (adj, overlaps, mut mat_reads, mut mat_names) =
-                    create_overlap_graph_unified_from_readsource(&idx_src, config);
-                // If the CLI would have reverse-complemented reads2, apply the same
-                // transformation to the indexed materialization so ordering/orientation
-                // match the in-memory pipeline.
-                if !no_revcomp {
-                    // reads1_count/read2_count were computed from the original file reads
-                    let start = reads1_count;
-                    let end = reads1_count + reads2_count;
-                    if end <= mat_reads.len() {
-                        let tail: Vec<String> = mat_reads[start..end].to_vec();
-                        match reverse_complement_all(tail) {
-                            Ok(rc_tail) => {
-                                for (i, v) in rc_tail.into_iter().enumerate() {
-                                    mat_reads[start + i] = v;
-                                }
-                                for i in start..end {
-                                    if let Some(nm) = mat_names.get_mut(i) {
-                                        *nm = format!("{}/RC", nm.clone());
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to reverse-complement indexed reads: {:?}", e);
-                            }
-                        }
-                    }
+        if let Some(base) = chosen_base {
+            let seqs_path = base.with_extension("seqs");
+            let sidx_path = seqs_path.with_extension("sidx.json");
+            if !seqs_path.exists() || !sidx_path.exists() {
+                // Build index at `base`. If the user requested persistence via
+                // `--output-index` then `base` will reflect that path; if the user
+                // requested a temporary index (via `--read-index` with no value),
+                // `base` was already set above to a path under a tempdir.
+                info!("Index files not found for {:?}, building index", base);
+                sequitur::read_source::build_index_from_pair(
+                    std::path::Path::new(reads1_path),
+                    std::path::Path::new(reads2_path),
+                    &base,
+                    no_revcomp,
+                )
+                .map_err(|e| anyhow!("Failed to build read index: {:?}", e))?;
+            }
+
+            let base_str = base.to_string_lossy().to_string();
+            match sequitur::read_source::BinaryIndexReadSource::open(&base_str) {
+                Ok(idx_src) => {
+                    let (adj, overlaps, mat_reads, mat_names) =
+                        create_overlap_graph_unified_from_readsource(&idx_src, config);
+                    reads = mat_reads;
+                    read_ids = mat_names;
+                    (adj, overlaps)
                 }
-                // Replace in-memory reads/read_ids with indexed ordering
-                reads = mat_reads;
-                read_ids = mat_names;
-                (adj, overlaps)
+                Err(e) => {
+                    log::warn!(
+                        "Failed to open read index {:?}, falling back to in-memory: {:?}",
+                        base_str,
+                        e
+                    );
+                    create_overlap_graph_unified(&reads, config)
+                }
             }
-            Err(e) => {
-                log::warn!(
-                    "Failed to open read index {:?}, falling back to in-memory: {:?}",
-                    index_path,
-                    e
-                );
-                create_overlap_graph_unified(&reads, config)
-            }
+        } else {
+            create_overlap_graph_unified(&reads, config)
         }
-    } else {
-        create_overlap_graph_unified(&reads, config)
     };
 
     info!("Overlap graph created.");
@@ -686,7 +762,8 @@ mod smoke {
             false, // use_array
             0.25,
             sequitur::DEFAULT_MIN_SUFFIX_LEN,
-            None, // read_index
+            ReadIndexArg::Absent,
+            None, // output_index
             None, // export_read_map
             2.0,  // error_penalty_exponent
         );
