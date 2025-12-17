@@ -13,7 +13,7 @@ julian jacobs 1605267 masters dissertation.pdf
 # Test structure - keep small fixtures and metadata, ignore large data/results
 tests/*/results/
 tests/synthetic/bee_movie*/data/
-tests/real/*/data/
+tests/real/*
 tests/fixtures/
 !tests/datasets.yaml
 !tests/README.md

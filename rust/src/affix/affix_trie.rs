@@ -698,52 +698,139 @@ impl PrunedAffixTrie {
         max_diff: f32,
         min_suffix_len: usize,
     ) -> Vec<(usize, usize, f32, usize)> {
-        let raw = self.overlap_candidates(reads);
+        // Stream candidates from trie nodes directly to avoid large intermediate allocation.
         let mut best: HashMap<(usize, usize), (f32, usize)> = HashMap::new();
 
-        for (suf_idx, pre_idx, shared_affix) in raw {
-            let suffix_read = &reads[suf_idx];
-            let prefix_read = &reads[pre_idx];
+        for (&key, node) in &self.nodes {
+            match node {
+                AffixNode::Delta {
+                    prefix_extensions,
+                    suffix_extensions,
+                    roots,
+                } => {
+                    // Collect all reads at this delta
+                    let mut reads_here = HashSet::new();
+                    reads_here.insert(key.0);
 
-            let anchor_len = shared_affix.len();
-            let min_len = min_suffix_len.max(1);
-            let max_span = suffix_read.len().min(prefix_read.len());
-
-            // Start span at anchor or min_len, extend a little around anchor
-            let start_span = anchor_len.max(min_len);
-            let end_span = max_span.min(start_span + 20);
-
-            let mut best_score = f32::MIN;
-            let mut best_overlap = 0usize;
-
-            for span in start_span..=end_span {
-                if span > suffix_read.len() || span > prefix_read.len() {
-                    break;
-                }
-                let suffix_window = &suffix_read[suffix_read.len() - span..];
-                let prefix_window = &prefix_read[..span];
-
-                let distance = damerau_levenshtein(suffix_window, prefix_window);
-                let float_diff = distance as f32 / span as f32;
-
-                if float_diff <= max_diff {
-                    let error_rate = distance as f32 / span as f32;
-                    let quality_factor = (1.0 - error_rate).powf(2.0);
-                    let score = span as f32 * quality_factor;
-                    if score > best_score || (score == best_score && span > best_overlap) {
-                        best_score = score;
-                        best_overlap = span;
+                    for &ext in prefix_extensions {
+                        reads_here.insert(ext.0);
                     }
-                } else if span > anchor_len + 5 {
-                    break;
-                }
-            }
+                    for &ext in suffix_extensions {
+                        reads_here.insert(ext.0);
+                    }
+                    for root in roots.iter() {
+                        reads_here.insert(root);
+                    }
 
-            if best_score > f32::MIN {
-                let key = (suf_idx, pre_idx);
-                let prev = best.get(&key).copied().unwrap_or((f32::MIN, 0));
-                if best_score > prev.0 || (best_score == prev.0 && best_overlap > prev.1) {
-                    best.insert(key, (best_score, best_overlap));
+                    let reads_vec: Vec<usize> = reads_here.into_iter().collect();
+                    for &read1 in &reads_vec {
+                        for &read2 in &reads_vec {
+                            if read1 == read2 {
+                                continue;
+                            }
+                            // perform lightweight verification for this pair
+                            let suffix_read = &reads[read1];
+                            let prefix_read = &reads[read2];
+                            let anchor_len = key.2 - key.1; // length of affix
+                            let min_len = min_suffix_len.max(1);
+                            let max_span = suffix_read.len().min(prefix_read.len());
+                            let start_span = anchor_len.max(min_len);
+                            let end_span = max_span.min(start_span + 20);
+
+                            let mut best_score = f32::MIN;
+                            let mut best_overlap = 0usize;
+                            for span in start_span..=end_span {
+                                if span > suffix_read.len() || span > prefix_read.len() {
+                                    break;
+                                }
+                                let suffix_window = &suffix_read[suffix_read.len() - span..];
+                                let prefix_window = &prefix_read[..span];
+                                let distance = damerau_levenshtein(suffix_window, prefix_window);
+                                let float_diff = distance as f32 / span as f32;
+                                if float_diff <= max_diff {
+                                    let error_rate = distance as f32 / span as f32;
+                                    let quality_factor = (1.0 - error_rate).powf(2.0);
+                                    let score = span as f32 * quality_factor;
+                                    if score > best_score
+                                        || (score == best_score && span > best_overlap)
+                                    {
+                                        best_score = score;
+                                        best_overlap = span;
+                                    }
+                                } else if span > anchor_len + 5 {
+                                    break;
+                                }
+                            }
+                            if best_score > f32::MIN {
+                                let key = (read1, read2);
+                                let prev = best.get(&key).copied().unwrap_or((f32::MIN, 0));
+                                if best_score > prev.0
+                                    || (best_score == prev.0 && best_overlap > prev.1)
+                                {
+                                    best.insert(key, (best_score, best_overlap));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                AffixNode::Leaf | AffixNode::Chain { .. } => {
+                    let affix_str = &reads[key.0][key.1..key.2];
+                    if let Some(contributors) = self.affix_contributors.get(affix_str) {
+                        if contributors.len() > 1 {
+                            let ids: Vec<usize> = contributors.iter().copied().collect();
+                            for &read1 in &ids {
+                                for &read2 in &ids {
+                                    if read1 == read2 {
+                                        continue;
+                                    }
+                                    let suffix_read = &reads[read1];
+                                    let prefix_read = &reads[read2];
+                                    let anchor_len = affix_str.len();
+                                    let min_len = min_suffix_len.max(1);
+                                    let max_span = suffix_read.len().min(prefix_read.len());
+                                    let start_span = anchor_len.max(min_len);
+                                    let end_span = max_span.min(start_span + 20);
+
+                                    let mut best_score = f32::MIN;
+                                    let mut best_overlap = 0usize;
+                                    for span in start_span..=end_span {
+                                        if span > suffix_read.len() || span > prefix_read.len() {
+                                            break;
+                                        }
+                                        let suffix_window =
+                                            &suffix_read[suffix_read.len() - span..];
+                                        let prefix_window = &prefix_read[..span];
+                                        let distance =
+                                            damerau_levenshtein(suffix_window, prefix_window);
+                                        let float_diff = distance as f32 / span as f32;
+                                        if float_diff <= max_diff {
+                                            let error_rate = distance as f32 / span as f32;
+                                            let quality_factor = (1.0 - error_rate).powf(2.0);
+                                            let score = span as f32 * quality_factor;
+                                            if score > best_score
+                                                || (score == best_score && span > best_overlap)
+                                            {
+                                                best_score = score;
+                                                best_overlap = span;
+                                            }
+                                        } else if span > anchor_len + 5 {
+                                            break;
+                                        }
+                                    }
+                                    if best_score > f32::MIN {
+                                        let key = (read1, read2);
+                                        let prev = best.get(&key).copied().unwrap_or((f32::MIN, 0));
+                                        if best_score > prev.0
+                                            || (best_score == prev.0 && best_overlap > prev.1)
+                                        {
+                                            best.insert(key, (best_score, best_overlap));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -752,6 +839,139 @@ impl PrunedAffixTrie {
         best.into_iter()
             .map(|((s, p), (score, span))| (s, p, score, span))
             .collect()
+    }
+
+    /// Streaming variant: invoke `emit` for each verified candidate as it's found.
+    /// This avoids allocating a full Vec of verified tuples at once and lets
+    /// callers integrate candidates incrementally.
+    pub fn overlap_verified_candidates_stream<F>(
+        &self,
+        reads: &[String],
+        max_diff: f32,
+        min_suffix_len: usize,
+        mut emit: F,
+    ) where
+        F: FnMut(usize, usize, f32, usize),
+    {
+        for (&key, node) in &self.nodes {
+            match node {
+                AffixNode::Delta {
+                    prefix_extensions,
+                    suffix_extensions,
+                    roots,
+                } => {
+                    let mut reads_here = HashSet::new();
+                    reads_here.insert(key.0);
+
+                    for &ext in prefix_extensions {
+                        reads_here.insert(ext.0);
+                    }
+                    for &ext in suffix_extensions {
+                        reads_here.insert(ext.0);
+                    }
+                    for root in roots.iter() {
+                        reads_here.insert(root);
+                    }
+
+                    let reads_vec: Vec<usize> = reads_here.into_iter().collect();
+                    for &read1 in &reads_vec {
+                        for &read2 in &reads_vec {
+                            if read1 == read2 {
+                                continue;
+                            }
+                            let suffix_read = &reads[read1];
+                            let prefix_read = &reads[read2];
+                            let anchor_len = key.2 - key.1; // length of affix
+                            let min_len = min_suffix_len.max(1);
+                            let max_span = suffix_read.len().min(prefix_read.len());
+                            let start_span = anchor_len.max(min_len);
+                            let end_span = max_span.min(start_span + 20);
+
+                            let mut best_score = f32::MIN;
+                            let mut best_overlap = 0usize;
+                            for span in start_span..=end_span {
+                                if span > suffix_read.len() || span > prefix_read.len() {
+                                    break;
+                                }
+                                let suffix_window = &suffix_read[suffix_read.len() - span..];
+                                let prefix_window = &prefix_read[..span];
+                                let distance = damerau_levenshtein(suffix_window, prefix_window);
+                                let float_diff = distance as f32 / span as f32;
+                                if float_diff <= max_diff {
+                                    let error_rate = distance as f32 / span as f32;
+                                    let quality_factor = (1.0 - error_rate).powf(2.0);
+                                    let score = span as f32 * quality_factor;
+                                    if score > best_score
+                                        || (score == best_score && span > best_overlap)
+                                    {
+                                        best_score = score;
+                                        best_overlap = span;
+                                    }
+                                } else if span > anchor_len + 5 {
+                                    break;
+                                }
+                            }
+                            if best_score > f32::MIN {
+                                emit(read1, read2, best_score, best_overlap);
+                            }
+                        }
+                    }
+                }
+
+                AffixNode::Leaf | AffixNode::Chain { .. } => {
+                    let affix_str = &reads[key.0][key.1..key.2];
+                    if let Some(contributors) = self.affix_contributors.get(affix_str) {
+                        if contributors.len() > 1 {
+                            let ids: Vec<usize> = contributors.iter().copied().collect();
+                            for &read1 in &ids {
+                                for &read2 in &ids {
+                                    if read1 == read2 {
+                                        continue;
+                                    }
+                                    let suffix_read = &reads[read1];
+                                    let prefix_read = &reads[read2];
+                                    let anchor_len = affix_str.len();
+                                    let min_len = min_suffix_len.max(1);
+                                    let max_span = suffix_read.len().min(prefix_read.len());
+                                    let start_span = anchor_len.max(min_len);
+                                    let end_span = max_span.min(start_span + 20);
+
+                                    let mut best_score = f32::MIN;
+                                    let mut best_overlap = 0usize;
+                                    for span in start_span..=end_span {
+                                        if span > suffix_read.len() || span > prefix_read.len() {
+                                            break;
+                                        }
+                                        let suffix_window =
+                                            &suffix_read[suffix_read.len() - span..];
+                                        let prefix_window = &prefix_read[..span];
+                                        let distance =
+                                            damerau_levenshtein(suffix_window, prefix_window);
+                                        let float_diff = distance as f32 / span as f32;
+                                        if float_diff <= max_diff {
+                                            let error_rate = distance as f32 / span as f32;
+                                            let quality_factor = (1.0 - error_rate).powf(2.0);
+                                            let score = span as f32 * quality_factor;
+                                            if score > best_score
+                                                || (score == best_score && span > best_overlap)
+                                            {
+                                                best_score = score;
+                                                best_overlap = span;
+                                            }
+                                        } else if span > anchor_len + 5 {
+                                            break;
+                                        }
+                                    }
+                                    if best_score > f32::MIN {
+                                        emit(read1, read2, best_score, best_overlap);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Iterate canonical affix sequences with their contributing read indices.

@@ -136,8 +136,13 @@ pub fn create_overlap_graph_unified<'a>(
     config: OverlapConfig,
 ) -> (CsMat<usize>, CsMat<usize>) {
     let min_suffix_len = config.min_suffix_len.max(1);
+    // Build trie, collect verified edges, drop trie, then build adjacency
     let trie = PrunedAffixTrie::build(reads, min_suffix_len, config.max_diff);
-    create_overlap_graph_from_trie(reads, &trie, config)
+    // Stream verified candidates directly into per-source rows to avoid
+    // materialising a full verified-vector in memory.
+    let (adj, ovl) = create_overlap_graph_from_trie_stream(reads, &trie, config);
+    drop(trie);
+    (adj, ovl)
 }
 
 /// Variant of unified overlap graph builder that accepts any `ReadSource`.
@@ -153,7 +158,10 @@ pub fn create_overlap_graph_unified_from_readsource<R: ReadSource + ?Sized>(
     let min_suffix_len = config.min_suffix_len.max(1);
     let (trie, mat_reads, mat_names) =
         PrunedAffixTrie::build_from_readsource(reads, min_suffix_len, config.max_diff);
-    let (adj, overlaps) = create_overlap_graph_from_trie(&mat_reads, &trie, config);
+    // Stream verified candidates into per-source rows while the trie exists,
+    // then drop it to release memory before constructing adjacency matrices.
+    let (adj, overlaps) = create_overlap_graph_from_trie_stream(&mat_reads, &trie, config);
+    drop(trie);
     (adj, overlaps, mat_reads, mat_names)
 }
 
@@ -277,6 +285,117 @@ fn create_overlap_graph_from_trie(
     }
 
     // Convert to CSR sparse matrices
+    let mut a_indptr: Vec<usize> = Vec::with_capacity(n + 1);
+    let mut a_indices: Vec<usize> = Vec::new();
+    let mut a_data: Vec<usize> = Vec::new();
+    let mut o_indptr: Vec<usize> = Vec::with_capacity(n + 1);
+    let mut o_indices: Vec<usize> = Vec::new();
+    let mut o_data: Vec<usize> = Vec::new();
+
+    a_indptr.push(0);
+    o_indptr.push(0);
+
+    for src_idx in 0..n {
+        // Collect outgoing edges from the per-row map
+        let mut edges: Vec<(usize, f32)> = per_source[src_idx]
+            .iter()
+            .map(|(&dst, &(score, _span))| (dst, score))
+            .collect();
+
+        let edges_before = edges.len();
+
+        // Apply knee-point detection if configured
+        if config.detect_score_cliff && !edges.is_empty() {
+            // Sort by score descending to detect the cliff
+            edges.sort_by(|(_, s1), (_, s2)| s2.partial_cmp(s1).unwrap());
+            let scores: Vec<f32> = edges.iter().map(|(_, s)| *s).collect();
+            let knee_idx = detect_knee_point(&scores);
+
+            log::debug!(
+                "[SCORE_CLIFF] Row {}: {} edges before, knee at index {}, keeping {} edges",
+                src_idx,
+                edges_before,
+                knee_idx,
+                knee_idx + 1
+            );
+            log::debug!("[SCORE_CLIFF] Row {} scores: {:?}", src_idx, scores);
+
+            // Truncate to keep only overlaps up to and including the knee point
+            edges.truncate(knee_idx + 1);
+
+            if edges.len() < edges_before {
+                log::debug!(
+                    "[SCORE_CLIFF] Row {}: removed {} edges due to score cliff",
+                    src_idx,
+                    edges_before - edges.len()
+                );
+            }
+        }
+
+        edges.sort_by_key(|(dst, _)| *dst);
+
+        for (dst, score) in edges {
+            let overlap_len = per_source[src_idx]
+                .get(&dst)
+                .copied()
+                .map(|(_s, span)| span)
+                .unwrap_or(0);
+            a_indices.push(dst);
+            a_data.push(score as usize);
+            o_indices.push(dst);
+            o_data.push(overlap_len);
+        }
+
+        a_indptr.push(a_indices.len());
+        o_indptr.push(o_indices.len());
+    }
+
+    let adjacency = CsMat::new((n, n), a_indptr, a_indices, a_data);
+    let overlaps = CsMat::new((n, n), o_indptr, o_indices, o_data);
+
+    (adjacency, overlaps)
+}
+
+/// Stream candidates from `affix_trie` into per-source maps and construct
+/// adjacency/overlap CSR matrices. This avoids materialising a large
+/// intermediate verified-vector and lets us drop the trie earlier.
+fn create_overlap_graph_from_trie_stream(
+    reads: &[String],
+    affix_trie: &crate::affix::PrunedAffixTrie,
+    config: OverlapConfig,
+) -> (CsMat<usize>, CsMat<usize>) {
+    if reads.is_empty() {
+        let empty1 = CsMat::<usize>::zero((0, 0));
+        let empty2 = CsMat::<usize>::zero((0, 0));
+        return (empty1, empty2);
+    }
+
+    let n = reads.len();
+
+    // Prepare per-source best maps
+    let mut per_source: Vec<HashMap<usize, (f32, usize)>> =
+        (0..n).map(|_| HashMap::new()).collect();
+
+    // Stream verified candidates from the trie into per_source
+    log::info!("Collecting & verifying candidates from trie (stream)...");
+    let mut found = 0usize;
+    affix_trie.overlap_verified_candidates_stream(
+        reads,
+        config.max_diff,
+        config.min_suffix_len,
+        |s, d, score, span| {
+            found += 1;
+            let row = &mut per_source[s];
+            let prev = row.get(&d).copied().unwrap_or((f32::MIN, 0));
+            if score > prev.0 || (score == prev.0 && span > prev.1) {
+                row.insert(d, (score, span));
+            }
+        },
+    );
+
+    log::info!("Found {} verified edges (streamed)", found);
+
+    // Convert per_source into CSR sparse matrices (reuse same logic as before)
     let mut a_indptr: Vec<usize> = Vec::with_capacity(n + 1);
     let mut a_indices: Vec<usize> = Vec::new();
     let mut a_data: Vec<usize> = Vec::new();
