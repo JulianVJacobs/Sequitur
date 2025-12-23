@@ -66,9 +66,16 @@ fn assemble_from_reads(
     // Generate read IDs (use indices for Python bindings)
     let read_ids: Vec<String> = (0..reads.len()).map(|i| format!("read{}", i)).collect();
 
-    // Call assembler (qualities not provided)
-    let (seq, _path) =
-        find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, &read_ids, None);
+    // Call assembler (qualities not provided) — use defaults: max_insert=500, window=5
+    let (seq, _path) = find_first_subdiagonal_path(
+        &adjacency_csc,
+        &overlap_csc,
+        &reads,
+        &read_ids,
+        None,
+        500,
+        5,
+    );
 
     Ok(AssemblyResult::new(seq))
 }

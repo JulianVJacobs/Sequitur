@@ -110,13 +110,23 @@ pub fn find_first_subdiagonal_path(
     reads: &[String],
     read_ids: &[String],
     qualities: Option<&[Vec<i32>]>,
+    max_insert: usize,
+    window: usize,
 ) -> (String, Vec<usize>) {
     // Delegate to the ReadSource-backed implementation so callers that supply
     // an in-memory `&[String]` continue to work while the core logic uses the
     // disk-backed protocol (`ReadSource`) internally.
     let inmem =
         crate::read_source::InMemoryReadSource::new(reads.to_vec(), Some(read_ids.to_vec()));
-    find_first_subdiagonal_path_from_readsource(matrix, overlap_csc, &inmem, read_ids, qualities)
+    find_first_subdiagonal_path_from_readsource(
+        matrix,
+        overlap_csc,
+        &inmem,
+        read_ids,
+        qualities,
+        max_insert,
+        window,
+    )
 }
 
 /// Compute assembly path (index order) from matrices without depending on in-memory reads.
@@ -267,6 +277,129 @@ pub fn compute_assembly_path(matrix: &CsMat<usize>, overlap_csc: &CsMat<usize>) 
     path
 }
 
+/// Post-assembly local refinement that attempts to bring mate pairs within `max_insert`
+/// by performing conservative adjacent swaps. Swaps are only allowed when the pair of
+/// adjacent reads form a swap-square (safe interchange) according to `is_swap_square`.
+pub fn enforce_mate_constraints_on_path<R: ReadSource + ?Sized>(
+    path: &mut Vec<usize>,
+    overlap_csc: &CsMat<usize>,
+    reads_src: &R,
+    mate_index_of: &Vec<Option<usize>>,
+    max_insert: usize,
+    _window: usize,
+) {
+    if path.is_empty() || mate_index_of.is_empty() {
+        return;
+    }
+
+    // map read id -> position in path
+    let mut idx_to_pos: HashMap<usize, usize> = HashMap::new();
+    for (pos, &rid) in path.iter().enumerate() {
+        idx_to_pos.insert(rid, pos);
+    }
+
+    // compute cumulative positions (start coordinate of each read in assembled sequence)
+    let mut positions: Vec<usize> = vec![0; path.len()];
+    let mut cum = 0usize;
+    for (i, &rid) in path.iter().enumerate() {
+        positions[i] = cum;
+        let len = reads_src.get_len(rid).unwrap_or(0);
+        let next_overlap = if i + 1 < path.len() {
+            overlap_csc.get(rid, path[i + 1]).copied().unwrap_or(0) as usize
+        } else {
+            0
+        };
+        let advance = len.saturating_sub(next_overlap);
+        cum = cum.saturating_add(advance);
+    }
+
+    // Iterate reads and try to move mates closer using safe adjacent swaps (swap-squares)
+    for i in 0..path.len() {
+        let read = path[i];
+        if read >= mate_index_of.len() {
+            continue;
+        }
+        if let Some(mate) = mate_index_of[read] {
+            if let Some(&mate_pos_initial) = idx_to_pos.get(&mate) {
+                // recompute distance in base coordinates
+                let mut mate_pos = mate_pos_initial;
+                let mut dist = if positions[mate_pos] >= positions[i] {
+                    positions[mate_pos] - positions[i]
+                } else {
+                    positions[i] - positions[mate_pos]
+                };
+                if dist <= max_insert {
+                    continue;
+                }
+
+                // Move mate left towards i by swapping adjacent nodes when safe
+                while mate_pos > i + 1 && dist > max_insert {
+                    let a = path[mate_pos - 1];
+                    let b = path[mate_pos];
+                    if is_swap_square(a, b, overlap_csc) {
+                        path.swap(mate_pos - 1, mate_pos);
+                        // update position map for swapped entries
+                        idx_to_pos.insert(a, mate_pos);
+                        idx_to_pos.insert(b, mate_pos - 1);
+                        // recompute positions conservatively (full recompute is simple and acceptable here)
+                        let mut cum2 = 0usize;
+                        for (k, &rid2) in path.iter().enumerate() {
+                            positions[k] = cum2;
+                            let len2 = reads_src.get_len(rid2).unwrap_or(0);
+                            let next_overlap2 = if k + 1 < path.len() {
+                                overlap_csc.get(rid2, path[k + 1]).copied().unwrap_or(0) as usize
+                            } else {
+                                0
+                            };
+                            let advance2 = len2.saturating_sub(next_overlap2);
+                            cum2 = cum2.saturating_add(advance2);
+                        }
+                        mate_pos -= 1;
+                        dist = if positions[mate_pos] >= positions[i] {
+                            positions[mate_pos] - positions[i]
+                        } else {
+                            positions[i] - positions[mate_pos]
+                        };
+                    } else {
+                        break;
+                    }
+                }
+
+                // Move mate right towards i (if mate is left of i) using same safe rule
+                while mate_pos + 1 < i && dist > max_insert {
+                    let a = path[mate_pos];
+                    let b = path[mate_pos + 1];
+                    if is_swap_square(a, b, overlap_csc) {
+                        path.swap(mate_pos, mate_pos + 1);
+                        idx_to_pos.insert(a, mate_pos + 1);
+                        idx_to_pos.insert(b, mate_pos);
+                        let mut cum2 = 0usize;
+                        for (k, &rid2) in path.iter().enumerate() {
+                            positions[k] = cum2;
+                            let len2 = reads_src.get_len(rid2).unwrap_or(0);
+                            let next_overlap2 = if k + 1 < path.len() {
+                                overlap_csc.get(rid2, path[k + 1]).copied().unwrap_or(0) as usize
+                            } else {
+                                0
+                            };
+                            let advance2 = len2.saturating_sub(next_overlap2);
+                            cum2 = cum2.saturating_add(advance2);
+                        }
+                        mate_pos += 1;
+                        dist = if positions[mate_pos] >= positions[i] {
+                            positions[mate_pos] - positions[i]
+                        } else {
+                            positions[i] - positions[mate_pos]
+                        };
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Assemble sequence and return (assembled_string, path) using a `ReadSource` for read access.
 pub fn find_first_subdiagonal_path_from_readsource<R: ReadSource + ?Sized>(
     matrix: &CsMat<usize>,
@@ -274,11 +407,74 @@ pub fn find_first_subdiagonal_path_from_readsource<R: ReadSource + ?Sized>(
     reads_src: &R,
     _read_ids: &[String],
     _qualities: Option<&[Vec<i32>]>,
+    max_insert: usize,
+    window: usize,
 ) -> (String, Vec<usize>) {
     let path = compute_assembly_path(matrix, overlap_csc);
     if path.is_empty() {
         return (String::new(), path);
     }
+    // Attempt to refine `path` using mate-pair information and an insert-size cutoff.
+    let mut path = path;
+    // Heuristic: build a mate-index mapping if possible from `_read_ids` or ordering.
+    let n_reads = reads_src.num_reads().unwrap_or(_read_ids.len());
+    let mut mate_index_of: Vec<Option<usize>> = vec![None; n_reads];
+    if !_read_ids.is_empty() && _read_ids.len() == n_reads {
+        // Detect typical index layout where reads1 are first half and reads2 (reverse-complemented)
+        // are the second half (index created by `build_index_from_pair`). Use "/RC" suffix when present.
+        let rc_count = _read_ids.iter().filter(|s| s.ends_with("/RC")).count();
+        if rc_count > 0 && n_reads % 2 == 0 {
+            let half = n_reads / 2;
+            if _read_ids.iter().take(half).all(|s| !s.ends_with("/RC"))
+                && _read_ids.iter().skip(half).all(|s| s.ends_with("/RC"))
+            {
+                for i in 0..half {
+                    mate_index_of[i] = Some(i + half);
+                    mate_index_of[i + half] = Some(i);
+                }
+            } else {
+                // Fallback: match names by stripping "/RC" where present
+                let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+                for (i, name) in _read_ids.iter().enumerate() {
+                    name_to_idx.insert(name.clone(), i);
+                }
+                for (i, name) in _read_ids.iter().enumerate() {
+                    if name.ends_with("/RC") {
+                        let base = name.trim_end_matches("/RC").to_string();
+                        if let Some(&j) = name_to_idx.get(&base) {
+                            mate_index_of[i] = Some(j);
+                            mate_index_of[j] = Some(i);
+                        }
+                    }
+                }
+            }
+        } else if n_reads % 2 == 0 {
+            // No explicit RC markers — assume simple half-split ordering
+            let half = n_reads / 2;
+            for i in 0..half {
+                mate_index_of[i] = Some(i + half);
+                mate_index_of[i + half] = Some(i);
+            }
+        }
+    } else if n_reads % 2 == 0 {
+        // As a last resort, assume a half-split ordering when no names are supplied.
+        let half = n_reads / 2;
+        for i in 0..half {
+            mate_index_of[i] = Some(i + half);
+            mate_index_of[i + half] = Some(i);
+        }
+    }
+
+    // Apply mate constraints using provided parameters.
+    enforce_mate_constraints_on_path(
+        &mut path,
+        overlap_csc,
+        reads_src,
+        &mate_index_of,
+        max_insert,
+        window,
+    );
+
     let mut sequence: Vec<u8> = Vec::new();
     match reads_src.get_seq(path[0]) {
         Ok(s) => sequence.extend_from_slice(s.as_bytes()),
@@ -476,7 +672,7 @@ mod tests {
 
         let overlap_csc = overlaps_to_csc(&overlaps);
         let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None, 500, 5);
         assert_eq!(assembled, "ACGTAA");
     }
 
@@ -493,8 +689,15 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(2));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, Some(&qualities));
+        let (assembled, _path) = find_first_subdiagonal_path(
+            &matrix,
+            &overlap_csc,
+            &reads,
+            &read_ids,
+            Some(&qualities),
+            500,
+            5,
+        );
         assert_eq!(assembled, "ACGTAA");
     }
 
@@ -529,7 +732,7 @@ mod tests {
 
         // With swap-square guard, both orders should be acceptable
         let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None, 500, 5);
         // Result should be valid (either A→B→C or A→C→B path)
         assert!(assembled.starts_with("AAAA"));
         assert!(assembled.len() >= 12); // At least 3 reads worth
@@ -567,7 +770,7 @@ mod tests {
 
         let overlap_csc = overlaps_to_csc(&overlaps);
         let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None, 500, 5);
         // Should follow valid forward path: A→B→D, then append C
         assert!(assembled.len() > 0);
     }
@@ -603,7 +806,7 @@ mod tests {
 
         let overlap_csc = overlaps_to_csc(&overlaps);
         let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None, 500, 5);
         // With overlaps, total length will be: 8 + (8-3) + (8-3) + (8-3) = 8+5+5+5 = 23
         // But actual behavior depends on path order
         assert!(assembled.len() >= 8); // At least one read
@@ -636,11 +839,91 @@ mod tests {
 
         let overlap_csc = overlaps_to_csc(&overlaps);
         let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None, 500, 5);
         // With overlap=3: 8 + (8-3) + (8-3) = 8+5+5 = 18
         // But overlap includes overlapping bases, so: "AAAABBBB" + "BCCCC" + "CDDDD" = "AAAABBBBBCCCCCDDDD" (19 chars)
         assert_eq!(assembled.len(), 18); // Correct accounting for overlaps
         assert!(assembled.starts_with("AAAA"));
         assert!(assembled.ends_with("DDDD"));
+    }
+
+    #[test]
+    fn mate_refinement_adjacent_swaps_reduce_distance() {
+        use crate::read_source::InMemoryReadSource;
+
+        // Create a simple path of 4 reads: 0,1,2,3
+        // Mates: 0 <-> 3 (initially far apart). We allow swaps between (1,2) and (2,3)
+        let mut path = vec![0usize, 1usize, 2usize, 3usize];
+
+        // Build an overlap matrix that permits swap-square between (1,2) and (2,3)
+        let mut adj: Adjacency = vec![HashMap::new(); 4];
+        // Bidirectional edges for 1<->2 and 2<->3 to allow swaps
+        adj[1].insert(2, 1);
+        adj[2].insert(1, 1);
+        adj[2].insert(3, 1);
+        adj[3].insert(2, 1);
+        // Also provide forward overlaps for assembly concatenation
+        let overlap_csc = adjacency_to_sparse(&adj, Some(4)).to_csc();
+
+        // Construct reads of length 100 each so mate distance initially large
+        let reads = vec![
+            "A".repeat(100),
+            "C".repeat(100),
+            "G".repeat(100),
+            "T".repeat(100),
+        ];
+        let src = InMemoryReadSource::new(reads.clone(), None);
+
+        // Mate mapping: 0<->3
+        let mut mate_index_of: Vec<Option<usize>> = vec![None; 4];
+        mate_index_of[0] = Some(3);
+        mate_index_of[3] = Some(0);
+
+        // Before refinement, compute positions and ensure distance > threshold
+        let mut positions_before = vec![0usize; path.len()];
+        let mut cum = 0usize;
+        for (i, &rid) in path.iter().enumerate() {
+            positions_before[i] = cum;
+            let len = src.get_len(rid).unwrap_or(0);
+            let next_overlap = if i + 1 < path.len() {
+                overlap_csc.get(rid, path[i + 1]).copied().unwrap_or(0) as usize
+            } else {
+                0
+            };
+            cum = cum.saturating_add(len.saturating_sub(next_overlap));
+        }
+        let before_dist =
+            (positions_before[3] as isize - positions_before[0] as isize).abs() as usize;
+        assert!(before_dist > 50, "initial mate distance should be large");
+
+        // Run refinement with a small max_insert to force movement when possible
+        enforce_mate_constraints_on_path(&mut path, &overlap_csc, &src, &mate_index_of, 50, 5);
+
+        // Recompute positions after refinement
+        let mut positions_after = vec![0usize; path.len()];
+        let mut cum2 = 0usize;
+        for (i, &rid) in path.iter().enumerate() {
+            positions_after[i] = cum2;
+            let len = src.get_len(rid).unwrap_or(0);
+            let next_overlap = if i + 1 < path.len() {
+                overlap_csc.get(rid, path[i + 1]).copied().unwrap_or(0) as usize
+            } else {
+                0
+            };
+            cum2 = cum2.saturating_add(len.saturating_sub(next_overlap));
+        }
+
+        // find positions of read 0 and its mate 3
+        let pos0 = path.iter().position(|&x| x == 0).unwrap();
+        let pos3 = path.iter().position(|&x| x == 3).unwrap();
+        let after_dist =
+            (positions_after[pos3] as isize - positions_after[pos0] as isize).abs() as usize;
+
+        // Expect after refinement that distance is reduced (not necessarily within max_insert
+        // for this simple adjacency configuration)
+        assert!(
+            after_dist < before_dist,
+            "mate distance should be reduced by refinement"
+        );
     }
 }

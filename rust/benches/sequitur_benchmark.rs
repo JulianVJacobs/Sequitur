@@ -231,7 +231,9 @@ fn bench_matching_assembly(c: &mut Criterion) {
                     black_box(reads),
                     black_box(&read_ids),
                     None,
-                )
+                    500,
+                    5,
+                );
             });
         });
     }
@@ -257,7 +259,7 @@ fn bench_end_to_end(c: &mut Criterion) {
                 let ovl_csc = ovl_matrix.to_csc();
                 let read_ids: Vec<String> =
                     (0..reads.len()).map(|i| format!("read{}", i)).collect();
-                find_first_subdiagonal_path(&adj_csc, &ovl_csc, reads, &read_ids, None)
+                find_first_subdiagonal_path(&adj_csc, &ovl_csc, reads, &read_ids, None, 500, 5)
             });
         });
     }

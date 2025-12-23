@@ -129,6 +129,10 @@ struct AssembleArgs {
     #[arg(long, default_value_t = sequitur::DEFAULT_MIN_SUFFIX_LEN)]
     min_suffix_len: usize,
 
+    /// Maximum allowed insert size when attempting mate-pair local refinement
+    #[arg(long)]
+    max_insert: Option<usize>,
+
     /// Optional path to a prebuilt read index (.seqs/.sidx.json) to use for read access.
     /// If the flag is provided with no value, a temporary index will be created and
     /// deleted after the run unless `--output-index` is also supplied (in which case
@@ -211,6 +215,7 @@ fn main() {
         args.use_array,
         args.max_diff,
         args.min_suffix_len,
+        args.max_insert,
         read_index_mode,
         args.output_index.as_deref(),
         args.export_read_map.as_deref(),
@@ -375,6 +380,7 @@ fn run_pipeline(
     use_array: bool,
     max_diff_cli: f32,
     min_suffix_len_cli: usize,
+    max_insert_cli: Option<usize>,
     read_index: ReadIndexArg,
     output_index: Option<&str>,
     export_read_map: Option<&str>,
@@ -611,8 +617,15 @@ fn run_pipeline(
         adjacency_csc.nnz()
     );
 
-    let (assembled, assembly_path) =
-        find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, &read_ids, None);
+    let (assembled, assembly_path) = find_first_subdiagonal_path(
+        &adjacency_csc,
+        &overlap_csc,
+        &reads,
+        &read_ids,
+        None,
+        max_insert_cli.unwrap_or(500),
+        5,
+    );
     debug!("[DEBUG] Assembly sequence length: {}", assembled.len());
     debug!("[DEBUG] Assembly path order: {:?}", assembly_path);
 
@@ -762,6 +775,7 @@ mod smoke {
             false, // use_array
             0.25,
             sequitur::DEFAULT_MIN_SUFFIX_LEN,
+            None,
             ReadIndexArg::Absent,
             None, // output_index
             None, // export_read_map

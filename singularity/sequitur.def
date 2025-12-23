@@ -29,7 +29,7 @@ From: alpine:3.18
     pip3 install --no-cache-dir numpy scipy biopython maturin
 
     # Clone the repository and build the Rust release binary
-    git clone https://github.com/JulianVJacobs/Sequitur.git /opt/sequitur
+    git clone --branch mate-parity --single-branch https://github.com/JulianVJacobs/Sequitur.git /opt/sequitur
     cd /opt/sequitur/rust
     /root/.cargo/bin/cargo build --release --features parallel
 
