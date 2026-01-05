@@ -59,7 +59,7 @@ fn bench_overlap_construction(c: &mut Criterion) {
                 b.iter(|| {
                     let candidates = trie.overlap_candidates(black_box(reads));
                     // Build overlap graph from candidates (without trie construction)
-                    create_overlap_graph_from_candidates(black_box(reads), candidates, config)
+                    create_overlap_graph_from_candidates(black_box(reads), candidates, &config)
                 });
             },
         );
@@ -72,7 +72,7 @@ fn bench_overlap_construction(c: &mut Criterion) {
 fn create_overlap_graph_from_candidates(
     reads: &[String],
     candidates: Vec<(usize, usize, String)>,
-    config: OverlapConfig,
+    config: &OverlapConfig,
 ) -> (sprs::CsMat<usize>, sprs::CsMat<usize>) {
     use std::collections::HashMap;
 
@@ -91,7 +91,7 @@ fn create_overlap_graph_from_candidates(
         let prefix_read = &reads[*prefix_idx];
 
         if let Some((score, overlap_len)) =
-            verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config)
+            verify_overlap_from_anchor(suffix_read, prefix_read, shared_affix, config.clone())
         {
             let key = (*suffix_idx, *prefix_idx);
             let current_best = best_scores.get(&key).copied().unwrap_or(0.0);
@@ -165,7 +165,7 @@ fn bench_verification(c: &mut Criterion) {
                     black_box(suffix_read),
                     black_box(prefix_read),
                     black_box(shared_affix),
-                    config,
+                    config.clone(),
                 );
             }
         });
@@ -186,7 +186,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
             BenchmarkId::new("trie_fuzzy_kmer", n),
             &reads,
             |b, reads| {
-                b.iter(|| create_overlap_graph_unified(black_box(reads), cfg));
+                b.iter(|| create_overlap_graph_unified(black_box(reads), cfg.clone()));
             },
         );
     }
@@ -252,7 +252,7 @@ fn bench_end_to_end(c: &mut Criterion) {
             b.iter(|| {
                 // Complete pipeline: trie -> overlap graph -> matching -> assembly
                 let (adj_matrix, ovl_matrix) =
-                    create_overlap_graph_unified(black_box(reads), config);
+                    create_overlap_graph_unified(black_box(reads), config.clone());
                 let adj_csc = adj_matrix.to_csc();
                 let ovl_csc = ovl_matrix.to_csc();
                 let read_ids: Vec<String> =
@@ -282,7 +282,7 @@ fn bench_error_rate_impact(c: &mut Criterion) {
             BenchmarkId::new("max_diff", (max_diff * 100.0) as u32),
             &config,
             |b, config| {
-                b.iter(|| create_overlap_graph_unified(black_box(&reads), *config));
+                b.iter(|| create_overlap_graph_unified(black_box(&reads), config.clone()));
             },
         );
     }

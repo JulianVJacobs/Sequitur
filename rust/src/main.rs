@@ -13,7 +13,8 @@ use flate2::read::MultiGzDecoder;
 
 use sequitur::{
     create_overlap_graph_unified, create_overlap_graph_unified_from_readsource,
-    find_first_subdiagonal_path_with_options, AssemblyOptions, OverlapConfig,
+    create_overlap_graph_with_ambiguities, find_first_subdiagonal_path_with_options, AmbiguityInfo,
+    AssemblyOptions, OverlapConfig,
 };
 
 /// Sequitur Rust CLI (prototype)
@@ -97,6 +98,26 @@ struct AssembleArgs {
     /// Bonus to apply to mate edges (paired reads) when breaking ties (0.0 disables).
     #[arg(long, default_value_t = 0.0)]
     mate_bonus: f32,
+
+    /// Enable mate-aware tie-breaking: apply penalties to paths that don't lead to mate pairs (default: false).
+    #[arg(long, default_value_t = false)]
+    mate_aware_ties: bool,
+
+    /// Expected insert size (fragment length) for paired-end reads when using mate-aware tie-breaking.
+    #[arg(long, default_value_t = 300)]
+    insert_size: usize,
+
+    /// Weight factor for mate penalties (higher = stronger penalty for non-mate paths).
+    #[arg(long, default_value_t = 1.0)]
+    mate_penalty_weight: f32,
+
+    /// Maximum hops to search when computing mate penalty (limits BFS depth).
+    #[arg(long, default_value_t = 10)]
+    mate_penalty_hop_limit: usize,
+
+    /// Maximum cumulative cost (in bases) for mate penalty path search.
+    #[arg(long, default_value_t = 1000)]
+    mate_penalty_cost_cap: usize,
 
     /// Split contigs when encountering high ambiguity (tied successors) or weak edges.
     #[arg(long, default_value_t = false)]
@@ -236,6 +257,11 @@ fn main() {
         args.output_index.as_deref(),
         args.export_read_map.as_deref(),
         args.error_penalty_exponent,
+        args.mate_aware_ties,
+        args.insert_size,
+        args.mate_penalty_weight,
+        args.mate_penalty_hop_limit,
+        args.mate_penalty_cost_cap,
     ) {
         eprintln!("Assembly failed: {error:?}");
         std::process::exit(1);
@@ -404,6 +430,11 @@ fn run_pipeline(
     output_index: Option<&str>,
     export_read_map: Option<&str>,
     error_penalty_exponent: f32,
+    mate_aware_ties: bool,
+    insert_size: usize,
+    mate_penalty_weight: f32,
+    mate_penalty_hop_limit: usize,
+    mate_penalty_cost_cap: usize,
 ) -> Result<String> {
     // If an index is requested (explicit base, temp request, or output_index supplied)
     // avoid reading and reverse-complementing the reads into memory here to prevent
@@ -483,6 +514,22 @@ fn run_pipeline(
         info!("Read map exported to {} (NDJSON format)", json_path);
     }
 
+    // Build mate map if mate-aware scoring or mate bonus is enabled
+    let mate_map_vec = if (mate_aware_ties || mate_bonus != 0.0)
+        && reads1_count > 0
+        && reads2_count == reads1_count
+    {
+        let mut mm: Vec<Option<usize>> = vec![None; reads1_count + reads2_count];
+        for i in 0..reads1_count {
+            let mate_idx = reads1_count + i;
+            mm[i] = Some(mate_idx);
+            mm[mate_idx] = Some(i);
+        }
+        Some(mm)
+    } else {
+        None
+    };
+
     let config = OverlapConfig {
         use_threads,
         max_workers,
@@ -491,6 +538,13 @@ fn run_pipeline(
         min_suffix_len: min_suffix_len_cli,
         error_penalty_exponent,
         detect_score_cliff,
+        tie_gap,
+        mate_aware_scoring: mate_aware_ties,
+        mate_map: mate_map_vec.clone(),
+        insert_size,
+        mate_penalty_weight,
+        mate_penalty_hop_limit,
+        mate_penalty_cost_cap,
         ..OverlapConfig::default()
     };
     if config.use_trie {
@@ -503,7 +557,11 @@ fn run_pipeline(
     }
     info!("Creating overlap graph (unified)...");
     // Determine whether to use an on-disk index (either from `--read-index` or `--output-index`).
-    let (mut adjacency_matrix, overlap_matrix) = {
+    let (mut adjacency_matrix, overlap_matrix, ambiguities): (
+        sprs::CsMat<usize>,
+        sprs::CsMat<usize>,
+        Option<Vec<AmbiguityInfo>>,
+    ) = {
         // `_temp_index_dir` will hold a TempDir when we auto-create a temporary index
         // so that the directory (and files) live for the duration of this scope.
         // Leading underscore suppresses unused-variable warnings while keeping it alive.
@@ -559,7 +617,7 @@ fn run_pipeline(
                         create_overlap_graph_unified_from_readsource(&idx_src, config);
                     reads = mat_reads;
                     read_ids = mat_names;
-                    (adj, overlaps)
+                    (adj, overlaps, None)
                 }
                 Err(e) => {
                     log::warn!(
@@ -567,13 +625,27 @@ fn run_pipeline(
                         base_str,
                         e
                     );
-                    create_overlap_graph_unified(&reads, config)
+                    let (adj, ovl) = create_overlap_graph_unified(&reads, config);
+                    (adj, ovl, None)
                 }
             }
+        } else if break_on_ambiguity {
+            // Use ambiguity-aware construction for non-index mode when breaking enabled
+            let result = create_overlap_graph_with_ambiguities(&reads, config);
+            info!(
+                "Detected {} ambiguous reads for contig breaking",
+                result.ambiguities.iter().filter(|a| a.is_ambiguous).count()
+            );
+            (result.adjacency, result.overlaps, Some(result.ambiguities))
         } else {
-            create_overlap_graph_unified(&reads, config)
+            let (adj, ovl) = create_overlap_graph_unified(&reads, config);
+            (adj, ovl, None)
         }
     };
+
+    if break_on_ambiguity && index_requested {
+        log::warn!("Contig breaking on ambiguity is not yet supported with --read-index mode");
+    }
 
     info!("Overlap graph created.");
 
@@ -637,24 +709,13 @@ fn run_pipeline(
     );
 
     // Build a simple mate map when we know the paired layout (reads1 then reads2, equal counts).
-    let mate_map = if mate_bonus != 0.0 && reads1_count > 0 && reads2_count == reads1_count {
-        let mut mm: Vec<Option<usize>> = vec![None; reads.len()];
-        for i in 0..reads1_count {
-            let mate_idx = reads1_count + i;
-            mm[i] = Some(mate_idx);
-            mm[mate_idx] = Some(i);
-        }
-        Some(Arc::new(mm))
-    } else {
-        None
-    };
+    let _mate_map = mate_map_vec.map(Arc::new);
 
     let assembly_opts = AssemblyOptions {
         tie_gap,
         break_on_ambiguity,
         break_score_threshold,
-        mate_bonus,
-        mate_map,
+        ambiguities,
     };
 
     let assembly_result = find_first_subdiagonal_path_with_options(
@@ -840,9 +901,14 @@ mod smoke {
             0.25,
             sequitur::DEFAULT_MIN_SUFFIX_LEN,
             ReadIndexArg::Absent,
-            None, // output_index
-            None, // export_read_map
-            2.0,  // error_penalty_exponent
+            None,  // output_index
+            None,  // export_read_map
+            2.0,   // error_penalty_exponent
+            false, // mate_aware_ties
+            300,   // insert_size
+            1.0,   // mate_penalty_weight
+            10,    // mate_penalty_hop_limit
+            1000,  // mate_penalty_cost_cap
         );
         assert!(res.is_ok());
     }

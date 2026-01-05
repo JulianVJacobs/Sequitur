@@ -6,40 +6,12 @@ pub fn is_swap_square(i: usize, j: usize, matrix: &CsMat<usize>) -> bool {
 }
 /// Sequence reconstruction helpers.
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use sprs::{indexing::SpIndex, CsMat, TriMat};
 
 use lapjv::lapjv;
 
 use crate::overlap::Adjacency;
-
-/// Options that influence assembly post-processing (contig splitting, tie handling).
-#[derive(Debug, Clone)]
-pub struct AssemblyOptions {
-    /// Treat rows with top-band ties as ambiguous when gap <= tie_gap.
-    pub tie_gap: f32,
-    /// Start a new contig when hitting an ambiguous read or weak/absent edge.
-    pub break_on_ambiguity: bool,
-    /// Optional edge-weight threshold to trigger a break (<= threshold breaks).
-    pub break_score_threshold: Option<usize>,
-    /// Bonus applied to mate edges when breaking ties during path search.
-    pub mate_bonus: f32,
-    /// Optional map from read index to its mate (by index) for tie-breaking.
-    pub mate_map: Option<Arc<Vec<Option<usize>>>>,
-}
-
-impl Default for AssemblyOptions {
-    fn default() -> Self {
-        Self {
-            tie_gap: 0.0,
-            break_on_ambiguity: false,
-            break_score_threshold: None,
-            mate_bonus: 0.0,
-            mate_map: None,
-        }
-    }
-}
 use crate::read_source::ReadSource;
 
 pub fn argmin_index(values: &[usize]) -> Option<usize> {
@@ -101,6 +73,30 @@ pub struct AssemblyResult {
     pub contigs: Vec<String>,
     pub contig_paths: Vec<Vec<usize>>,
     pub full_path: Vec<usize>,
+}
+
+/// Options that influence assembly post-processing (contig splitting, tie handling).
+#[derive(Debug, Clone)]
+pub struct AssemblyOptions {
+    /// Gap threshold to consider successors tied/ambiguous (0 = exact ties).
+    pub tie_gap: f32,
+    /// Split contigs when encountering ambiguous successors.
+    pub break_on_ambiguity: bool,
+    /// Break contigs when the edge score is below or equal to this threshold.
+    pub break_score_threshold: Option<usize>,
+    /// Precomputed ambiguity information from overlap construction.
+    pub ambiguities: Option<Vec<crate::overlap::AmbiguityInfo>>,
+}
+
+impl Default for AssemblyOptions {
+    fn default() -> Self {
+        Self {
+            tie_gap: 0.0,
+            break_on_ambiguity: false,
+            break_score_threshold: None,
+            ambiguities: None,
+        }
+    }
 }
 
 /// Relabel column indices in-place according to the provided mapping.
@@ -180,34 +176,14 @@ pub fn find_first_subdiagonal_path_with_options(
 pub fn compute_assembly_path(
     matrix: &CsMat<usize>,
     overlap_csc: &CsMat<usize>,
-    opts: &AssemblyOptions,
+    _opts: &AssemblyOptions,
 ) -> Vec<usize> {
     use ndarray::Array2;
     let n = matrix.rows();
     let mut cost_matrix = Array2::<f64>::zeros((n, n));
-
-    let mate_bonus = opts.mate_bonus as f64;
-    let mate_map = opts
-        .mate_map
-        .as_deref()
-        .map(|v| v.as_slice())
-        .unwrap_or(&[]);
-
-    let has_mate_edge = |src: usize, dst: usize| -> bool {
-        if mate_bonus == 0.0 {
-            return false;
-        }
-        let mate_src = mate_map.get(src).and_then(|m| *m);
-        let mate_dst = mate_map.get(dst).and_then(|m| *m);
-        mate_src == Some(dst) || mate_dst == Some(src)
-    };
-
     for i in 0..n {
         for j in 0..n {
-            let mut score = matrix.get(i, j).copied().unwrap_or(0) as f64;
-            if has_mate_edge(i, j) {
-                score += mate_bonus;
-            }
+            let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
             cost_matrix[(i, j)] = -score;
         }
     }
@@ -292,25 +268,6 @@ pub fn compute_assembly_path(
     let mut current = start;
     let mut tried_for_node: HashMap<usize, HashSet<usize>> = HashMap::new();
 
-    let mate_bonus = opts.mate_bonus as f64;
-    let mate_map = opts
-        .mate_map
-        .as_deref()
-        .map(|v| v.as_slice())
-        .unwrap_or(&[]);
-
-    let weight_with_bonus = |src: usize, dst: usize, base: usize| -> f64 {
-        let mut w = base as f64;
-        if mate_bonus != 0.0 {
-            let mate_src = mate_map.get(src).and_then(|m| *m);
-            let mate_dst = mate_map.get(dst).and_then(|m| *m);
-            if mate_src == Some(dst) || mate_dst == Some(src) {
-                w += mate_bonus;
-            }
-        }
-        w
-    };
-
     while visited.len() < n {
         let tried = tried_for_node.entry(current).or_insert_with(HashSet::new);
         let mut best: Option<(usize, f64, usize)> = None;
@@ -324,7 +281,7 @@ pub fn compute_assembly_path(
                     .get(current, target)
                     .copied()
                     .unwrap_or_default();
-                let effective = weight_with_bonus(current, target, weight);
+                let effective = weight as f64;
                 match best {
                     None => best = Some((target, effective, overlap)),
                     Some((bt, bw, bo)) => {
@@ -407,10 +364,18 @@ pub fn find_first_subdiagonal_path_with_options_from_readsource<R: ReadSource + 
         };
     }
 
-    // Precompute ambiguous rows based on tie_gap across top-band scores.
+    // Precompute ambiguous rows: use precomputed ambiguities if available,
+    // otherwise fall back to dynamic tie_gap detection across top-band scores.
     let n = matrix.rows();
-    let mut ambiguous: Vec<bool> = vec![false; n];
-    if opts.tie_gap >= 0.0 {
+    let mut ambiguous: Vec<bool> = if let Some(ref amb_info) = opts.ambiguities {
+        // Use precomputed ambiguities from overlap construction
+        amb_info.iter().map(|info| info.is_ambiguous).collect()
+    } else {
+        vec![false; n]
+    };
+
+    // If no precomputed ambiguities, detect them dynamically using tie_gap
+    if opts.ambiguities.is_none() && opts.tie_gap >= 0.0 {
         for (row_idx, row_vec) in matrix.outer_iterator().enumerate() {
             let mut scores: Vec<usize> = row_vec.data().iter().copied().collect();
             if scores.is_empty() {
@@ -601,7 +566,6 @@ pub fn detect_cycles(adjacency: &Adjacency) -> Vec<Vec<usize>> {
 mod tests {
     use super::*;
     use crate::overlap::OverlapLengths;
-    use std::sync::Arc;
 
     // Helper for tests that still use HashMap format
     fn overlaps_to_csc(overlaps: &OverlapLengths) -> CsMat<usize> {
@@ -698,45 +662,6 @@ mod tests {
             find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, Some(&qualities));
         assert_eq!(res.contigs.len(), 1);
         assert_eq!(res.contigs[0], "ACGTAA");
-    }
-
-    #[test]
-    fn mate_bonus_prefers_mate_in_tie() {
-        // Three reads; read0 is mates with read1. Base weights strongly favor read2,
-        // but mate bonus should steer to read1.
-        let mut adjacency: Adjacency = vec![HashMap::new(); 3];
-        adjacency[0].insert(1, 2); // mate edge, weaker
-        adjacency[0].insert(2, 10); // non-mate, stronger without bonus
-        adjacency[1].insert(2, 4);
-
-        let mut overlaps: OverlapLengths = vec![HashMap::new(); 3];
-        overlaps[0].insert(1, 2);
-        overlaps[0].insert(2, 2);
-        overlaps[1].insert(2, 2);
-
-        let matrix = adjacency_to_csc(&adjacency, Some(3));
-        let overlap_csc = overlaps_to_csc(&overlaps);
-
-        let mate_map = Arc::new(vec![Some(1), Some(0), None]);
-
-        let opts_no_bonus = AssemblyOptions {
-            tie_gap: 0.0,
-            break_on_ambiguity: false,
-            break_score_threshold: None,
-            mate_bonus: 0.0,
-            mate_map: Some(mate_map.clone()),
-        };
-        let path_no_bonus = compute_assembly_path(&matrix, &overlap_csc, &opts_no_bonus);
-        assert_eq!(path_no_bonus.len(), 3);
-        assert_eq!(&path_no_bonus[..2], &[0, 2]); // chooses stronger non-mate edge
-
-        let opts_with_bonus = AssemblyOptions {
-            mate_bonus: 20.0,
-            ..opts_no_bonus
-        };
-        let path_with_bonus = compute_assembly_path(&matrix, &overlap_csc, &opts_with_bonus);
-        assert_eq!(path_with_bonus.len(), 3);
-        assert_eq!(&path_with_bonus[..2], &[0, 1]); // mate edge wins after bonus
     }
 
     #[test]

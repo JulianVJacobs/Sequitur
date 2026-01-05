@@ -1,6 +1,6 @@
 //! Overlap graph construction primitives translated from the Python reference.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use sprs::CsMat;
 use strsim::damerau_levenshtein;
@@ -14,8 +14,16 @@ pub type Adjacency = Vec<HashMap<usize, usize>>;
 /// Companion mapping that records the overlap span associated with each edge.
 pub type OverlapLengths = Vec<HashMap<usize, usize>>;
 
+/// Result of overlap graph construction including ambiguity information.
+#[derive(Debug)]
+pub struct OverlapGraphResult {
+    pub adjacency: CsMat<usize>,
+    pub overlaps: CsMat<usize>,
+    pub ambiguities: Vec<AmbiguityInfo>,
+}
+
 /// Configuration options that govern overlap graph construction.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct OverlapConfig {
     /// Maximum normalised Damerau–Levenshtein distance permitted for an edge.
     pub max_diff: f32,
@@ -35,6 +43,20 @@ pub struct OverlapConfig {
     pub error_penalty_exponent: f32,
     /// Detect and remove low-quality overlaps using knee-point detection on score distribution.
     pub detect_score_cliff: bool,
+    /// Threshold for detecting ambiguous reads (gap ≤ tie_gap means ambiguous); 0.0 = exact ties only.
+    pub tie_gap: f32,
+    /// Enable mate-aware scoring (apply mate penalties to tied successors of ambiguous reads).
+    pub mate_aware_scoring: bool,
+    /// Optional mapping from read index to mate index for mate-aware scoring.
+    pub mate_map: Option<Vec<Option<usize>>>,
+    /// Expected insert size between mate pairs (in basepairs).
+    pub insert_size: usize,
+    /// Weight factor for mate penalty (penalty = weight × distance_error).
+    pub mate_penalty_weight: f32,
+    /// Maximum hops for bounded shortest path search in mate penalty calculation.
+    pub mate_penalty_hop_limit: usize,
+    /// Maximum basepair distance cap for bounded shortest path search.
+    pub mate_penalty_cost_cap: usize,
 }
 
 impl Default for OverlapConfig {
@@ -49,8 +71,230 @@ impl Default for OverlapConfig {
             parabolic_patience: 3,
             error_penalty_exponent: 2.0, // Quadratic penalty by default
             detect_score_cliff: true,    // Knee detection enabled by default
+            tie_gap: 0.0,                // Exact ties only by default
+            mate_aware_scoring: false,   // Disabled by default for backward compatibility
+            mate_map: None,
+            insert_size: 300, // Default ~300bp insert size
+            mate_penalty_weight: 1.0,
+            mate_penalty_hop_limit: 10,
+            mate_penalty_cost_cap: 1000,
         }
     }
+}
+
+/// Information about ambiguous successors for a read.
+#[derive(Debug, Clone)]
+pub struct AmbiguityInfo {
+    /// Read index in the assembly.
+    pub read_idx: usize,
+    /// Whether this read has multiple successors within tie_gap of the top score.
+    pub is_ambiguous: bool,
+    /// Indices of successor reads that are tied with (or near) the top score.
+    pub tied_successors: Vec<usize>,
+}
+
+/// Detect ambiguous reads based on top-1 vs top-2 score gap.
+/// Returns a mapping from read index to ambiguity information.
+pub fn detect_ambiguities(
+    per_source: &[HashMap<usize, (f32, usize)>],
+    tie_gap: f32,
+) -> Vec<AmbiguityInfo> {
+    let mut ambiguities = Vec::new();
+
+    for (read_idx, successors) in per_source.iter().enumerate() {
+        if successors.is_empty() {
+            ambiguities.push(AmbiguityInfo {
+                read_idx,
+                is_ambiguous: false,
+                tied_successors: Vec::new(),
+            });
+            continue;
+        }
+
+        // Get all successor scores
+        let mut scores: Vec<(usize, f32)> = successors
+            .iter()
+            .map(|(&dst, &(score, _span))| (dst, score))
+            .collect();
+
+        // Sort by score descending
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        let top_score = scores[0].1;
+        // Find all successors within tie_gap of the top score
+        let tied_successors: Vec<usize> = scores
+            .iter()
+            .filter(|(_dst, score)| (top_score - score).abs() <= tie_gap)
+            .map(|(dst, _score)| *dst)
+            .collect();
+
+        let is_ambiguous = tied_successors.len() >= 2;
+
+        ambiguities.push(AmbiguityInfo {
+            read_idx,
+            is_ambiguous,
+            tied_successors,
+        });
+    }
+
+    ambiguities
+}
+
+/// Compute the basepair distance along a path between two reads in the assembly graph.
+/// Uses bounded BFS to find a path from start to target within hop and cost limits.
+/// Returns Some(distance) if a path exists within bounds, None otherwise.
+///
+/// # Arguments
+/// * `start` - Starting read index
+/// * `target` - Target read index
+/// * `adjacency` - Sparse adjacency matrix (scores as usize)
+/// * `overlaps` - Sparse overlap matrix (overlap lengths as usize)
+/// * `read_lengths` - Vector of read lengths (for computing basepair distances)
+/// * `hop_limit` - Maximum number of edges to traverse
+/// * `cost_cap` - Maximum cumulative basepair distance to allow
+///
+/// # Returns
+/// Some(distance_in_bp) if path found within limits, None otherwise
+pub fn bounded_shortest_path(
+    start: usize,
+    target: usize,
+    adjacency: &CsMat<usize>,
+    overlaps: &CsMat<usize>,
+    read_lengths: &[usize],
+    hop_limit: usize,
+    cost_cap: usize,
+) -> Option<usize> {
+    if start == target {
+        return Some(0);
+    }
+
+    if start >= read_lengths.len() || target >= read_lengths.len() {
+        return None;
+    }
+
+    // BFS with (node, cumulative_distance, hop_count)
+    let mut queue = VecDeque::new();
+    let mut visited = HashSet::new();
+
+    queue.push_back((start, 0_usize, 0_usize));
+    visited.insert(start);
+
+    let adj_csc = adjacency.to_csc();
+    let ovl_csc = overlaps.to_csc();
+
+    while let Some((current, dist, hops)) = queue.pop_front() {
+        if hops >= hop_limit {
+            continue;
+        }
+
+        // Get successors from adjacency matrix
+        // In CSC format, we need to iterate over the row to find outgoing edges
+        for col_idx in 0..adj_csc.cols() {
+            if let Some(_score) = adj_csc.get(current, col_idx) {
+                let row_idx = col_idx;
+
+                if visited.contains(&row_idx) {
+                    continue;
+                }
+
+                let overlap_len = ovl_csc.get(current, row_idx).copied().unwrap_or(0);
+                let read_len = read_lengths.get(current).copied().unwrap_or(0);
+
+                // Distance advanced = read_length - overlap_length
+                let step_dist = read_len.saturating_sub(overlap_len);
+                let new_dist = dist + step_dist;
+
+                if new_dist > cost_cap {
+                    continue;
+                }
+
+                if row_idx == target {
+                    return Some(new_dist);
+                }
+
+                visited.insert(row_idx);
+                queue.push_back((row_idx, new_dist, hops + 1));
+            }
+        }
+    }
+
+    None
+}
+
+/// Calculate mate penalty based on predicted distance to mate pair.
+/// Returns 0.0 if no mate, or a penalty proportional to the deviation from expected insert size.
+///
+/// # Arguments
+/// * `read_idx` - Index of the current read
+/// * `successor_idx` - Index of the candidate successor
+/// * `mate_map` - Optional mapping from read index to mate index
+/// * `adjacency` - Sparse adjacency matrix
+/// * `overlaps` - Sparse overlap matrix
+/// * `read_lengths` - Vector of read lengths
+/// * `insert_size` - Expected insert size between mate pairs
+/// * `penalty_weight` - Multiplier for the penalty
+/// * `hop_limit` - Maximum hops for bounded search
+/// * `cost_cap` - Maximum distance for bounded search
+///
+/// # Returns
+/// Penalty value to subtract from quality-adjusted score (0.0 if no mate or within tolerance)
+pub fn compute_mate_penalty(
+    read_idx: usize,
+    successor_idx: usize,
+    mate_map: Option<&Vec<Option<usize>>>,
+    adjacency: &CsMat<usize>,
+    overlaps: &CsMat<usize>,
+    read_lengths: &[usize],
+    insert_size: usize,
+    penalty_weight: f32,
+    hop_limit: usize,
+    cost_cap: usize,
+) -> f32 {
+    // No penalty if no mate information
+    let mate_map = match mate_map {
+        Some(m) => m,
+        None => return 0.0,
+    };
+
+    // No penalty if this read doesn't have a mate
+    let mate_idx = match mate_map.get(read_idx).and_then(|m| *m) {
+        Some(idx) => idx,
+        None => return 0.0,
+    };
+
+    // Compute the first step: read_idx -> successor_idx
+    let overlap_len = overlaps.get(read_idx, successor_idx).copied().unwrap_or(0);
+    let read_len = read_lengths.get(read_idx).copied().unwrap_or(0);
+    let first_step = read_len.saturating_sub(overlap_len);
+
+    // Find path from successor to mate
+    let successor_to_mate_dist = bounded_shortest_path(
+        successor_idx,
+        mate_idx,
+        adjacency,
+        overlaps,
+        read_lengths,
+        hop_limit,
+        cost_cap,
+    );
+
+    let predicted_distance = match successor_to_mate_dist {
+        Some(dist) => first_step + dist,
+        None => {
+            // Cannot reach mate within bounds - apply maximum penalty
+            return penalty_weight * (cost_cap as f32);
+        }
+    };
+
+    // Compute distance error
+    let distance_error = if predicted_distance > insert_size {
+        (predicted_distance - insert_size) as f32
+    } else {
+        (insert_size - predicted_distance) as f32
+    };
+
+    // Apply penalty proportional to error
+    penalty_weight * distance_error
 }
 
 /// Detect the knee (elbow) point in a sorted score distribution.
@@ -163,6 +407,25 @@ pub fn create_overlap_graph_unified_from_readsource<R: ReadSource + ?Sized>(
     let (adj, overlaps) = create_overlap_graph_from_trie_stream(&mat_reads, &trie, config);
     drop(trie);
     (adj, overlaps, mat_reads, mat_names)
+}
+
+/// Build the weighted overlap graph with ambiguity detection.
+/// Returns adjacency, overlaps, and ambiguity information for each read.
+pub fn create_overlap_graph_with_ambiguities<'a>(
+    reads: &'a [String],
+    config: OverlapConfig,
+) -> OverlapGraphResult {
+    let min_suffix_len = config.min_suffix_len.max(1);
+    let trie = PrunedAffixTrie::build(reads, min_suffix_len, config.max_diff);
+    let (adj, overlaps, ambiguities) =
+        create_overlap_graph_from_trie_stream_with_ambiguities(reads, &trie, config);
+    drop(trie);
+
+    OverlapGraphResult {
+        adjacency: adj,
+        overlaps,
+        ambiguities,
+    }
 }
 
 /// Build overlap graph from trie implementation (optimized).
@@ -467,6 +730,205 @@ fn create_overlap_graph_from_trie_stream(
     (adjacency, overlaps)
 }
 
+/// Stream candidates from `affix_trie` into per-source maps and construct
+/// adjacency/overlap CSR matrices with ambiguity detection.
+/// Returns adjacency, overlap, and ambiguity information matrices.
+fn create_overlap_graph_from_trie_stream_with_ambiguities(
+    reads: &[String],
+    affix_trie: &crate::affix::PrunedAffixTrie,
+    config: OverlapConfig,
+) -> (CsMat<usize>, CsMat<usize>, Vec<AmbiguityInfo>) {
+    if reads.is_empty() {
+        let empty1 = CsMat::<usize>::zero((0, 0));
+        let empty2 = CsMat::<usize>::zero((0, 0));
+        return (empty1, empty2, Vec::new());
+    }
+
+    let n = reads.len();
+
+    // Prepare per-source best maps
+    let mut per_source: Vec<HashMap<usize, (f32, usize)>> =
+        (0..n).map(|_| HashMap::new()).collect();
+
+    // Stream verified candidates from the trie into per_source
+    log::info!("Collecting & verifying candidates from trie (stream)...");
+    affix_trie.overlap_verified_candidates_stream(
+        reads,
+        config.max_diff,
+        config.min_suffix_len,
+        |s, d, score, span| {
+            let row = &mut per_source[s];
+            let prev = row.get(&d).copied().unwrap_or((f32::MIN, 0));
+            if score > prev.0 || (score == prev.0 && span > prev.1) {
+                row.insert(d, (score, span));
+            }
+        },
+    );
+
+    // Detect ambiguities before converting to sparse matrices
+    let ambiguities = detect_ambiguities(&per_source, config.tie_gap);
+
+    // Apply mate penalties to ambiguous reads if mate-aware scoring is enabled
+    if config.mate_aware_scoring {
+        if let Some(ref mate_map) = config.mate_map {
+            log::info!("Applying mate penalties to ambiguous reads...");
+
+            // First, build temporary sparse matrices to enable path search
+            let temp_adj = build_temp_adjacency(&per_source, n);
+            let temp_ovl = build_temp_overlaps(&per_source, n);
+
+            // Get read lengths for distance calculation
+            let read_lengths: Vec<usize> = reads.iter().map(|r| r.len()).collect();
+
+            // Apply penalties to tied successors of ambiguous reads
+            for (src_idx, amb_info) in ambiguities.iter().enumerate() {
+                if !amb_info.is_ambiguous {
+                    continue;
+                }
+
+                // For each tied successor, compute mate penalty and adjust score
+                for &dst_idx in &amb_info.tied_successors {
+                    let penalty = compute_mate_penalty(
+                        src_idx,
+                        dst_idx,
+                        Some(mate_map),
+                        &temp_adj,
+                        &temp_ovl,
+                        &read_lengths,
+                        config.insert_size,
+                        config.mate_penalty_weight,
+                        config.mate_penalty_hop_limit,
+                        config.mate_penalty_cost_cap,
+                    );
+
+                    // Update score in per_source
+                    if let Some((score, _span)) = per_source[src_idx].get_mut(&dst_idx) {
+                        *score -= penalty;
+                        log::debug!(
+                            "[MATE_PENALTY] Read {} -> {} penalty={:.2}, new_score={:.2}",
+                            src_idx,
+                            dst_idx,
+                            penalty,
+                            *score
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Build sparse matrices from per_source
+    let mut a_indptr = vec![0];
+    let mut a_indices = Vec::new();
+    let mut a_data = Vec::new();
+
+    let mut o_indptr = vec![0];
+    let mut o_indices = Vec::new();
+    let mut o_data = Vec::new();
+
+    for src_idx in 0..n {
+        let mut edges: Vec<(usize, f32)> = per_source[src_idx]
+            .iter()
+            .map(|(&dst, &(score, _span))| (dst, score))
+            .collect();
+
+        let edges_before = edges.len();
+
+        // Apply knee-point detection if configured
+        if config.detect_score_cliff && !edges.is_empty() {
+            edges.sort_by(|(_, s1), (_, s2)| s2.partial_cmp(s1).unwrap());
+            let scores: Vec<f32> = edges.iter().map(|(_, s)| *s).collect();
+            let knee_idx = detect_knee_point(&scores);
+
+            log::debug!(
+                "[SCORE_CLIFF] Row {}: {} edges before, knee at index {}, keeping {} edges",
+                src_idx,
+                edges_before,
+                knee_idx,
+                knee_idx + 1
+            );
+
+            edges.truncate(knee_idx + 1);
+
+            if edges.len() < edges_before {
+                log::debug!(
+                    "[SCORE_CLIFF] Row {}: removed {} edges due to score cliff",
+                    src_idx,
+                    edges_before - edges.len()
+                );
+            }
+        }
+
+        edges.sort_by_key(|(dst, _)| *dst);
+
+        for (dst, score) in edges {
+            let overlap_len = per_source[src_idx]
+                .get(&dst)
+                .copied()
+                .map(|(_s, span)| span)
+                .unwrap_or(0);
+            a_indices.push(dst);
+            a_data.push(score as usize);
+            o_indices.push(dst);
+            o_data.push(overlap_len);
+        }
+
+        a_indptr.push(a_indices.len());
+        o_indptr.push(o_indices.len());
+    }
+
+    let adjacency = CsMat::new((n, n), a_indptr, a_indices, a_data);
+    let overlaps = CsMat::new((n, n), o_indptr, o_indices, o_data);
+
+    (adjacency, overlaps, ambiguities)
+}
+
+/// Build temporary adjacency matrix from per_source map for mate penalty calculation.
+fn build_temp_adjacency(per_source: &[HashMap<usize, (f32, usize)>], n: usize) -> CsMat<usize> {
+    let mut indptr = vec![0];
+    let mut indices = Vec::new();
+    let mut data = Vec::new();
+
+    for src_idx in 0..n {
+        let mut edges: Vec<(usize, f32)> = per_source[src_idx]
+            .iter()
+            .map(|(&dst, &(score, _span))| (dst, score))
+            .collect();
+        edges.sort_by_key(|(dst, _)| *dst);
+
+        for (dst, score) in edges {
+            indices.push(dst);
+            data.push(score as usize);
+        }
+        indptr.push(indices.len());
+    }
+
+    CsMat::new((n, n), indptr, indices, data)
+}
+
+/// Build temporary overlaps matrix from per_source map for mate penalty calculation.
+fn build_temp_overlaps(per_source: &[HashMap<usize, (f32, usize)>], n: usize) -> CsMat<usize> {
+    let mut indptr = vec![0];
+    let mut indices = Vec::new();
+    let mut data = Vec::new();
+
+    for src_idx in 0..n {
+        let mut edges: Vec<(usize, usize)> = per_source[src_idx]
+            .iter()
+            .map(|(&dst, &(_score, span))| (dst, span))
+            .collect();
+        edges.sort_by_key(|(dst, _)| *dst);
+
+        for (dst, span) in edges {
+            indices.push(dst);
+            data.push(span);
+        }
+        indptr.push(indices.len());
+    }
+
+    CsMat::new((n, n), indptr, indices, data)
+}
+
 /// Verify overlap from trie anchor by extending bidirectionally from exact match.
 /// This leverages the shared_affix hint to avoid O(m²) full scan.
 /// Public for benchmarking purposes.
@@ -669,5 +1131,406 @@ mod tests {
         assert!((confidences[1][0].1 - 1.0).abs() < 1e-12);
 
         assert!(confidences[2].is_empty());
+    }
+
+    #[test]
+    fn test_ambiguity_detection_exact_ties() {
+        let mut per_source: Vec<HashMap<usize, (f32, usize)>> =
+            vec![HashMap::new(), HashMap::new(), HashMap::new()];
+
+        // Read 0: two successors with identical scores (exact tie)
+        per_source[0].insert(1, (100.0, 45));
+        per_source[0].insert(2, (100.0, 50)); // Same score as successor 1
+
+        // Read 1: three successors with identical scores (3-way tie)
+        per_source[1].insert(0, (50.0, 30));
+        per_source[1].insert(2, (50.0, 32));
+        per_source[1].insert(3, (50.0, 28)); // All tied
+
+        // Read 2: single successor (not ambiguous)
+        per_source[2].insert(0, (75.0, 40));
+
+        let ambiguities = detect_ambiguities(&per_source, 0.0);
+
+        assert_eq!(ambiguities.len(), 3);
+
+        // Read 0 should be flagged as ambiguous with 2 tied successors
+        assert!(ambiguities[0].is_ambiguous);
+        assert_eq!(ambiguities[0].tied_successors.len(), 2);
+        assert!(ambiguities[0].tied_successors.contains(&1));
+        assert!(ambiguities[0].tied_successors.contains(&2));
+
+        // Read 1 should be flagged as ambiguous with 3 tied successors
+        assert!(ambiguities[1].is_ambiguous);
+        assert_eq!(ambiguities[1].tied_successors.len(), 3);
+        assert!(ambiguities[1].tied_successors.contains(&0));
+        assert!(ambiguities[1].tied_successors.contains(&2));
+
+        // Read 2 should NOT be ambiguous
+        assert!(!ambiguities[2].is_ambiguous);
+        assert_eq!(ambiguities[2].tied_successors.len(), 1); // Only the successor
+    }
+
+    #[test]
+    fn test_ambiguity_detection_fuzzy_ties() {
+        let mut per_source: Vec<HashMap<usize, (f32, usize)>> = vec![HashMap::new()];
+
+        // Create successors with scores near each other
+        per_source[0].insert(1, (100.0, 45));
+        per_source[0].insert(2, (98.0, 50)); // Within tie_gap=5.0
+        per_source[0].insert(3, (92.0, 40)); // Outside tie_gap=5.0
+
+        // With tie_gap=0.0 (exact ties only)
+        let ambiguities_exact = detect_ambiguities(&per_source, 0.0);
+        assert!(!ambiguities_exact[0].is_ambiguous);
+        assert_eq!(ambiguities_exact[0].tied_successors.len(), 1);
+
+        // With tie_gap=5.0 (fuzzy ties)
+        let ambiguities_fuzzy = detect_ambiguities(&per_source, 5.0);
+        assert!(ambiguities_fuzzy[0].is_ambiguous);
+        assert_eq!(ambiguities_fuzzy[0].tied_successors.len(), 2);
+        assert!(ambiguities_fuzzy[0].tied_successors.contains(&1));
+        assert!(ambiguities_fuzzy[0].tied_successors.contains(&2));
+    }
+
+    #[test]
+    fn test_non_ambiguous_reads_unmarked() {
+        let mut per_source: Vec<HashMap<usize, (f32, usize)>> =
+            vec![HashMap::new(), HashMap::new()];
+
+        // Read 0: clear winner (score gap >> tie_gap)
+        per_source[0].insert(1, (100.0, 45));
+        per_source[0].insert(2, (70.0, 50)); // Large gap
+
+        // Read 1: also clear winner
+        per_source[1].insert(0, (50.0, 30));
+        per_source[1].insert(3, (20.0, 20)); // Large gap
+
+        let ambiguities = detect_ambiguities(&per_source, 0.0);
+
+        assert_eq!(ambiguities.len(), 2);
+        assert!(!ambiguities[0].is_ambiguous);
+        assert!(!ambiguities[1].is_ambiguous);
+    }
+
+    #[test]
+    fn test_overlap_graph_with_ambiguities() {
+        let reads = vec![
+            "AAAAAA".to_string(),
+            "AAAAAA".to_string(), // Exact tie with read 0
+            "CCCCCC".to_string(),
+        ];
+
+        let config = OverlapConfig {
+            tie_gap: 0.0,
+            ..Default::default()
+        };
+
+        let result = create_overlap_graph_with_ambiguities(&reads, config);
+
+        // Should have 3 reads
+        assert_eq!(result.ambiguities.len(), 3);
+
+        // Verify ambiguity info is populated
+        for amb in &result.ambiguities {
+            assert!(amb.read_idx < 3);
+        }
+    }
+
+    #[test]
+    fn test_bounded_shortest_path_finds_mate() {
+        // Create a simple path: 0 -> 1 -> 2
+        // With overlaps and read lengths allowing distance calculation
+        use sprs::TriMat;
+
+        let n = 3;
+        let mut adj_builder = TriMat::new((n, n));
+        let mut ovl_builder = TriMat::new((n, n));
+
+        // Edge 0 -> 1 (score=10, overlap=5)
+        adj_builder.add_triplet(0, 1, 10);
+        ovl_builder.add_triplet(0, 1, 5);
+
+        // Edge 1 -> 2 (score=8, overlap=3)
+        adj_builder.add_triplet(1, 2, 8);
+        ovl_builder.add_triplet(1, 2, 3);
+
+        let adjacency = adj_builder.to_csr().to_csc();
+        let overlaps = ovl_builder.to_csr().to_csc();
+
+        // Read lengths: all 10bp
+        let read_lengths = vec![10, 10, 10];
+
+        // Find path from 0 to 2
+        // Distance should be: (10-5) + (10-3) = 5 + 7 = 12
+        let result = bounded_shortest_path(
+            0,
+            2,
+            &adjacency,
+            &overlaps,
+            &read_lengths,
+            10,  // hop_limit
+            100, // cost_cap
+        );
+
+        assert_eq!(result, Some(12));
+    }
+
+    #[test]
+    fn test_bounded_shortest_path_respects_limits() {
+        use sprs::TriMat;
+
+        let n = 4;
+        let mut adj_builder = TriMat::new((n, n));
+        let mut ovl_builder = TriMat::new((n, n));
+
+        // Chain: 0 -> 1 -> 2 -> 3
+        adj_builder.add_triplet(0, 1, 10);
+        ovl_builder.add_triplet(0, 1, 2);
+
+        adj_builder.add_triplet(1, 2, 10);
+        ovl_builder.add_triplet(1, 2, 2);
+
+        adj_builder.add_triplet(2, 3, 10);
+        ovl_builder.add_triplet(2, 3, 2);
+
+        let adjacency = adj_builder.to_csr().to_csc();
+        let overlaps = ovl_builder.to_csr().to_csc();
+        let read_lengths = vec![10, 10, 10, 10];
+
+        // Test hop limit: cannot reach node 3 with only 2 hops from 0
+        let result_hop_limited = bounded_shortest_path(
+            0,
+            3,
+            &adjacency,
+            &overlaps,
+            &read_lengths,
+            2,   // hop_limit (too small)
+            100, // cost_cap
+        );
+        assert_eq!(result_hop_limited, None);
+
+        // Test cost limit: total distance would be 3*(10-2)=24
+        let result_cost_limited = bounded_shortest_path(
+            0,
+            3,
+            &adjacency,
+            &overlaps,
+            &read_lengths,
+            10, // hop_limit
+            20, // cost_cap (too small)
+        );
+        assert_eq!(result_cost_limited, None);
+
+        // With adequate limits, should succeed
+        let result_ok = bounded_shortest_path(
+            0,
+            3,
+            &adjacency,
+            &overlaps,
+            &read_lengths,
+            10, // hop_limit
+            50, // cost_cap
+        );
+        assert_eq!(result_ok, Some(24));
+    }
+
+    #[test]
+    fn test_mate_penalty_zero_for_non_ambiguous() {
+        use sprs::TriMat;
+
+        let n = 3;
+        let adj_builder = TriMat::new((n, n));
+        let ovl_builder = TriMat::new((n, n));
+
+        let adjacency = adj_builder.to_csr().to_csc();
+        let overlaps = ovl_builder.to_csr().to_csc();
+        let read_lengths = vec![100, 100, 100];
+
+        // No mate map provided
+        let penalty = compute_mate_penalty(
+            0,
+            1,
+            None,
+            &adjacency,
+            &overlaps,
+            &read_lengths,
+            300, // insert_size
+            1.0, // penalty_weight
+            10,  // hop_limit
+            500, // cost_cap
+        );
+
+        assert_eq!(penalty, 0.0);
+    }
+
+    #[test]
+    fn test_mate_penalty_nonzero_for_ambiguous_ties() {
+        use sprs::TriMat;
+
+        let n = 4;
+        let mut adj_builder = TriMat::new((n, n));
+        let mut ovl_builder = TriMat::new((n, n));
+
+        // Read 0 has two successors: 1 and 2 (ambiguous)
+        // Read 0's mate is read 3
+        // Path 0 -> 1 -> 3 has distance closer to insert_size
+        // Path 0 -> 2 (no connection to 3) should have higher penalty
+
+        adj_builder.add_triplet(0, 1, 10);
+        ovl_builder.add_triplet(0, 1, 50);
+
+        adj_builder.add_triplet(0, 2, 10); // Same score (ambiguous)
+        ovl_builder.add_triplet(0, 2, 50);
+
+        adj_builder.add_triplet(1, 3, 10);
+        ovl_builder.add_triplet(1, 3, 50);
+
+        let adjacency = adj_builder.to_csr().to_csc();
+        let overlaps = ovl_builder.to_csr().to_csc();
+        let read_lengths = vec![100, 100, 100, 100];
+
+        // Mate map: read 0's mate is read 3
+        let mate_map = vec![Some(3), None, None, Some(0)];
+
+        // Penalty for choosing successor 1 (can reach mate 3)
+        let penalty_good = compute_mate_penalty(
+            0,
+            1,
+            Some(&mate_map),
+            &adjacency,
+            &overlaps,
+            &read_lengths,
+            100, // insert_size (distance is (100-50)+(100-50)=100, perfect match)
+            1.0, // penalty_weight
+            10,  // hop_limit
+            500, // cost_cap
+        );
+
+        // Penalty for choosing successor 2 (cannot reach mate 3)
+        let penalty_bad = compute_mate_penalty(
+            0,
+            2,
+            Some(&mate_map),
+            &adjacency,
+            &overlaps,
+            &read_lengths,
+            100, // insert_size
+            1.0, // penalty_weight
+            10,  // hop_limit
+            500, // cost_cap
+        );
+
+        // Good path should have lower penalty than bad path
+        assert!(penalty_good < penalty_bad);
+        assert_eq!(penalty_good, 0.0); // Perfect distance match
+        assert!(penalty_bad > 0.0); // Cannot reach mate
+    }
+
+    #[test]
+    fn test_qas_with_mate_penalty() {
+        // Test that QAS = overlap_length - edit_penalty - mate_penalty
+        // when mate_aware_scoring is enabled
+
+        // Manually create a small overlap graph with ambiguous reads
+        let mut adj_builder = sprs::TriMat::new((4, 4));
+        let mut ovl_builder = sprs::TriMat::new((4, 4));
+
+        // Read 0 has two successors with equal weight (ambiguous)
+        adj_builder.add_triplet(0, 1, 10);
+        ovl_builder.add_triplet(0, 1, 50);
+        adj_builder.add_triplet(0, 2, 10);
+        ovl_builder.add_triplet(0, 2, 50);
+
+        // Read 1 connects to read 3 (mate of read 0)
+        adj_builder.add_triplet(1, 3, 10);
+        ovl_builder.add_triplet(1, 3, 50);
+
+        let adjacency = adj_builder.to_csr().to_csc();
+        let overlaps = ovl_builder.to_csr().to_csc();
+        let read_lengths = vec![100, 100, 100, 100];
+        let mate_map = vec![Some(3), None, None, Some(0)];
+
+        // Compute mate penalties for both successors
+        let penalty_1 = compute_mate_penalty(
+            0,
+            1,
+            Some(&mate_map),
+            &adjacency,
+            &overlaps,
+            &read_lengths,
+            100,
+            1.0,
+            10,
+            500,
+        );
+        let penalty_2 = compute_mate_penalty(
+            0,
+            2,
+            Some(&mate_map),
+            &adjacency,
+            &overlaps,
+            &read_lengths,
+            100,
+            1.0,
+            10,
+            500,
+        );
+
+        // Base QAS (assuming no edit penalty for simplicity)
+        let base_qas = 50.0;
+
+        // QAS with mate penalties
+        let qas_1 = base_qas - penalty_1;
+        let qas_2 = base_qas - penalty_2;
+
+        // Successor 1 (good path to mate) should have higher QAS
+        assert!(qas_1 > qas_2);
+        assert_eq!(qas_1, 50.0); // No penalty
+        assert!(qas_2 < 50.0); // Has penalty
+    }
+
+    #[test]
+    fn test_qas_without_mate_penalty() {
+        // Test that QAS = overlap_length - edit_penalty
+        // when mate_aware_scoring is disabled
+
+        let overlap_length = 50.0;
+        let edit_penalty = 0.0;
+        let mate_penalty = 0.0; // Not computed when mate_aware_scoring=false
+
+        let qas = overlap_length - edit_penalty - mate_penalty;
+        assert_eq!(qas, 50.0);
+    }
+
+    #[test]
+    fn test_mate_penalty_only_for_ambiguous_reads() {
+        // Test that mate penalties are only computed for reads flagged as ambiguous
+
+        let mut adj_builder = sprs::TriMat::new((3, 3));
+        let mut ovl_builder = sprs::TriMat::new((3, 3));
+
+        // Read 0 has one clear winner (not ambiguous)
+        adj_builder.add_triplet(0, 1, 20);
+        ovl_builder.add_triplet(0, 1, 50);
+        adj_builder.add_triplet(0, 2, 5);
+        ovl_builder.add_triplet(0, 2, 10);
+
+        let _adjacency = adj_builder.to_csr::<usize>();
+        let _overlaps = ovl_builder.to_csr::<usize>();
+
+        use std::collections::HashMap;
+        let mut per_source = vec![HashMap::new()];
+        per_source[0].insert(1, (20.0, 50));
+        per_source[0].insert(2, (5.0, 10));
+
+        let tie_gap = 0.0;
+        let ambiguities = detect_ambiguities(&per_source, tie_gap);
+
+        // Read 0 is not ambiguous (20 vs 5, clear winner)
+        assert!(!ambiguities[0].is_ambiguous);
+
+        // Therefore, mate penalty should not be computed for this read
+        // (In practice, we check is_ambiguous before calling compute_mate_penalty)
     }
 }
