@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(&path_no_bonus[..2], &[0, 2]); // chooses stronger non-mate edge
 
         let opts_with_bonus = AssemblyOptions {
-            mate_bonus: 2.0,
+            mate_bonus: 20.0,
             ..opts_no_bonus
         };
         let path_with_bonus = compute_assembly_path(&matrix, &overlap_csc, &opts_with_bonus);
