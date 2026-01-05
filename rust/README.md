@@ -61,6 +61,10 @@ cat ../tests/synthetic/swap_test/data/reads_1.fastq ../tests/synthetic/swap_test
 # run sequitur using the on-disk index
 ./target/release/sequitur ../tests/synthetic/swap_test/data/reads_1.fastq ../tests/synthetic/swap_test/data/reads_2.fastq \
   --read-index /tmp/swap_index --output-fasta ../tests/synthetic/swap_test/results/assembled_index.fasta
+
+# mate-aware tie-breaking: bias toward paired reads when weights tie or are close
+./target/release/sequitur ... --mate-bonus 1.5  # add a positive bonus to prefer mate edges
+## For deterministic pairing, keep reads1 and reads2 lengths equal; the CLI will build a mate map accordingly.
 ```
 
 Limitations / notes:

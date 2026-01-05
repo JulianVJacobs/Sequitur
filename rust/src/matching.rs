@@ -601,6 +601,7 @@ pub fn detect_cycles(adjacency: &Adjacency) -> Vec<Vec<usize>> {
 mod tests {
     use super::*;
     use crate::overlap::OverlapLengths;
+    use std::sync::Arc;
 
     // Helper for tests that still use HashMap format
     fn overlaps_to_csc(overlaps: &OverlapLengths) -> CsMat<usize> {
@@ -697,6 +698,45 @@ mod tests {
             find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, Some(&qualities));
         assert_eq!(res.contigs.len(), 1);
         assert_eq!(res.contigs[0], "ACGTAA");
+    }
+
+    #[test]
+    fn mate_bonus_prefers_mate_in_tie() {
+        // Three reads; read0 is mates with read1. Base weights strongly favor read2,
+        // but mate bonus should steer to read1.
+        let mut adjacency: Adjacency = vec![HashMap::new(); 3];
+        adjacency[0].insert(1, 2); // mate edge, weaker
+        adjacency[0].insert(2, 10); // non-mate, stronger without bonus
+        adjacency[1].insert(2, 4);
+
+        let mut overlaps: OverlapLengths = vec![HashMap::new(); 3];
+        overlaps[0].insert(1, 2);
+        overlaps[0].insert(2, 2);
+        overlaps[1].insert(2, 2);
+
+        let matrix = adjacency_to_csc(&adjacency, Some(3));
+        let overlap_csc = overlaps_to_csc(&overlaps);
+
+        let mate_map = Arc::new(vec![Some(1), Some(0), None]);
+
+        let opts_no_bonus = AssemblyOptions {
+            tie_gap: 0.0,
+            break_on_ambiguity: false,
+            break_score_threshold: None,
+            mate_bonus: 0.0,
+            mate_map: Some(mate_map.clone()),
+        };
+        let path_no_bonus = compute_assembly_path(&matrix, &overlap_csc, &opts_no_bonus);
+        assert_eq!(path_no_bonus.len(), 3);
+        assert_eq!(&path_no_bonus[..2], &[0, 2]); // chooses stronger non-mate edge
+
+        let opts_with_bonus = AssemblyOptions {
+            mate_bonus: 2.0,
+            ..opts_no_bonus
+        };
+        let path_with_bonus = compute_assembly_path(&matrix, &overlap_csc, &opts_with_bonus);
+        assert_eq!(path_with_bonus.len(), 3);
+        assert_eq!(&path_with_bonus[..2], &[0, 1]); // mate edge wins after bonus
     }
 
     #[test]
