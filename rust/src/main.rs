@@ -3,6 +3,7 @@ use log::{debug, info};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bio::alignment::distance::levenshtein;
@@ -12,7 +13,7 @@ use flate2::read::MultiGzDecoder;
 
 use sequitur::{
     create_overlap_graph_unified, create_overlap_graph_unified_from_readsource,
-    find_first_subdiagonal_path, OverlapConfig,
+    find_first_subdiagonal_path_with_options, AssemblyOptions, OverlapConfig,
 };
 
 /// Sequitur Rust CLI (prototype)
@@ -88,6 +89,22 @@ struct AssembleArgs {
     /// Detect and remove low-quality overlaps by finding the cliff (knee) in score distribution (default: true)
     #[arg(long, default_value_t = true)]
     detect_score_cliff: bool,
+
+    /// Gap threshold to consider successors tied/ambiguous (0 = exact ties).
+    #[arg(long, default_value_t = 0.0)]
+    tie_gap: f32,
+
+    /// Bonus to apply to mate edges (paired reads) when breaking ties (0.0 disables).
+    #[arg(long, default_value_t = 0.0)]
+    mate_bonus: f32,
+
+    /// Split contigs when encountering high ambiguity (tied successors) or weak edges.
+    #[arg(long, default_value_t = false)]
+    break_on_ambiguity: bool,
+
+    /// Break contigs when the edge score is <= this threshold (optional).
+    #[arg(long)]
+    break_score_threshold: Option<usize>,
 
     /// Output NDJSON file (.jsonl) for alternative path analysis
     #[arg(long)]
@@ -200,6 +217,10 @@ fn main() {
         args.output_fasta.as_deref(),
         args.reference.as_deref(),
         args.detect_score_cliff,
+        args.tie_gap,
+        args.mate_bonus,
+        args.break_on_ambiguity,
+        args.break_score_threshold,
         args.alternatives_jsonl.as_deref(),
         args.verbose,
         args.fasta_line_width,
@@ -364,6 +385,10 @@ fn run_pipeline(
     output_fasta: Option<&str>,
     reference_path: Option<&str>,
     detect_score_cliff: bool,
+    tie_gap: f32,
+    mate_bonus: f32,
+    break_on_ambiguity: bool,
+    break_score_threshold: Option<usize>,
     alternatives_jsonl: Option<&str>,
     verbose: bool,
     fasta_line_width: usize,
@@ -611,9 +636,41 @@ fn run_pipeline(
         adjacency_csc.nnz()
     );
 
-    let (assembled, assembly_path) =
-        find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, &read_ids, None);
-    debug!("[DEBUG] Assembly sequence length: {}", assembled.len());
+    // Build a simple mate map when we know the paired layout (reads1 then reads2, equal counts).
+    let mate_map = if mate_bonus != 0.0 && reads1_count > 0 && reads2_count == reads1_count {
+        let mut mm: Vec<Option<usize>> = vec![None; reads.len()];
+        for i in 0..reads1_count {
+            let mate_idx = reads1_count + i;
+            mm[i] = Some(mate_idx);
+            mm[mate_idx] = Some(i);
+        }
+        Some(Arc::new(mm))
+    } else {
+        None
+    };
+
+    let assembly_opts = AssemblyOptions {
+        tie_gap,
+        break_on_ambiguity,
+        break_score_threshold,
+        mate_bonus,
+        mate_map,
+    };
+
+    let assembly_result = find_first_subdiagonal_path_with_options(
+        &adjacency_csc,
+        &overlap_csc,
+        &reads,
+        &read_ids,
+        None,
+        &assembly_opts,
+    );
+    let assembly_path = assembly_result.full_path.clone();
+    let assembled_contigs = assembly_result.contigs;
+    debug!(
+        "[DEBUG] Assembly produced {} contig(s)",
+        assembled_contigs.len()
+    );
     debug!("[DEBUG] Assembly path order: {:?}", assembly_path);
 
     // Export combined alternatives JSONL if requested (per-read successors with assembly order)
@@ -655,81 +712,97 @@ fn run_pipeline(
             }
         }
         let mut fh = File::create(path)?;
-        let header = format!(
-            "assembled_from_{}_{}",
-            Path::new(reads1_path)
-                .file_name()
-                .unwrap_or_else(|| "reads1".as_ref())
-                .to_string_lossy(),
-            Path::new(reads2_path)
-                .file_name()
-                .unwrap_or_else(|| "reads2".as_ref())
-                .to_string_lossy()
-        );
-        writeln!(fh, ">{header}")?;
-        if fasta_line_width == 0 {
-            writeln!(fh, "{assembled}")?;
-        } else {
-            let mut i = 0;
-            let seq_len = assembled.len();
-            while i < seq_len {
-                let end = std::cmp::min(i + fasta_line_width, seq_len);
-                writeln!(fh, "{}", &assembled[i..end])?;
-                i = end;
+        for (idx, contig) in assembled_contigs.iter().enumerate() {
+            let header = format!(
+                "assembled_from_{}_{}_contig{}",
+                Path::new(reads1_path)
+                    .file_name()
+                    .unwrap_or_else(|| "reads1".as_ref())
+                    .to_string_lossy(),
+                Path::new(reads2_path)
+                    .file_name()
+                    .unwrap_or_else(|| "reads2".as_ref())
+                    .to_string_lossy(),
+                idx
+            );
+            writeln!(fh, ">{header}")?;
+            if fasta_line_width == 0 {
+                writeln!(fh, "{contig}")?;
+            } else {
+                let mut i = 0;
+                let seq_len = contig.len();
+                while i < seq_len {
+                    let end = std::cmp::min(i + fasta_line_width, seq_len);
+                    writeln!(fh, "{}", &contig[i..end])?;
+                    i = end;
+                }
             }
         }
     } else if verbose {
-        let header = format!(
-            ">assembled_from_{}_{}",
-            Path::new(reads1_path)
-                .file_name()
-                .unwrap_or_else(|| "reads1".as_ref())
-                .to_string_lossy(),
-            Path::new(reads2_path)
-                .file_name()
-                .unwrap_or_else(|| "reads2".as_ref())
-                .to_string_lossy()
-        );
-        info!("{header}");
-        if fasta_line_width == 0 {
-            debug!("{assembled}");
-        } else {
-            let mut i = 0;
-            let seq_len = assembled.len();
-            while i < seq_len {
-                let end = std::cmp::min(i + fasta_line_width, seq_len);
-                debug!("{}", &assembled[i..end]);
-                i = end;
+        for (idx, contig) in assembled_contigs.iter().enumerate() {
+            let header = format!(
+                ">assembled_from_{}_{}_contig{}",
+                Path::new(reads1_path)
+                    .file_name()
+                    .unwrap_or_else(|| "reads1".as_ref())
+                    .to_string_lossy(),
+                Path::new(reads2_path)
+                    .file_name()
+                    .unwrap_or_else(|| "reads2".as_ref())
+                    .to_string_lossy(),
+                idx
+            );
+            info!("{header}");
+            if fasta_line_width == 0 {
+                debug!("{contig}");
+            } else {
+                let mut i = 0;
+                let seq_len = contig.len();
+                while i < seq_len {
+                    let end = std::cmp::min(i + fasta_line_width, seq_len);
+                    debug!("{}", &contig[i..end]);
+                    i = end;
+                }
             }
         }
     }
 
     if let Some(reference_seq) = reference {
         const MAX_DISTANCE_LEN: usize = 20_000;
-        if assembled == reference_seq {
-            info!(
-                "Assembled contig matches the reference sequence exactly ({} bp).",
-                assembled.len()
-            );
-        } else if assembled.len() <= MAX_DISTANCE_LEN && reference_seq.len() <= MAX_DISTANCE_LEN {
-            let distance = levenshtein(assembled.as_bytes(), reference_seq.as_bytes());
-            info!(
-                "Edit distance to reference (len {} vs {}): {}",
-                assembled.len(),
-                reference_seq.len(),
-                distance
-            );
+        if assembled_contigs.len() == 1 {
+            let assembled = &assembled_contigs[0];
+            if assembled == &reference_seq {
+                info!(
+                    "Assembled contig matches the reference sequence exactly ({} bp).",
+                    assembled.len()
+                );
+            } else if assembled.len() <= MAX_DISTANCE_LEN && reference_seq.len() <= MAX_DISTANCE_LEN
+            {
+                let distance = levenshtein(assembled.as_bytes(), reference_seq.as_bytes());
+                info!(
+                    "Edit distance to reference (len {} vs {}): {}",
+                    assembled.len(),
+                    reference_seq.len(),
+                    distance
+                );
+            } else {
+                info!(
+                    "Reference check skipped: assembled length {} or reference length {} exceeds {} bp threshold.",
+                    assembled.len(),
+                    reference_seq.len(),
+                    MAX_DISTANCE_LEN
+                );
+            }
         } else {
             info!(
-                "Reference check skipped: assembled length {} or reference length {} exceeds {} bp threshold.",
-                assembled.len(),
-                reference_seq.len(),
-                MAX_DISTANCE_LEN
+                "Reference check skipped: multiple contigs ({}) produced; enable single-contig mode to compare.",
+                assembled_contigs.len()
             );
         }
     }
 
-    Ok(assembled)
+    let primary = assembled_contigs.first().cloned().unwrap_or_default();
+    Ok(primary)
 }
 
 #[cfg(test)]
@@ -750,7 +823,11 @@ mod smoke {
             tmp2.path().to_str().unwrap(),
             None,
             None,
-            true, // detect_score_cliff
+            true,  // detect_score_cliff
+            0.0,   // tie_gap
+            0.0,   // mate_bonus
+            false, // break_on_ambiguity
+            None,  // break_score_threshold
             None,
             false,
             60,

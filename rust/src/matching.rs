@@ -6,12 +6,40 @@ pub fn is_swap_square(i: usize, j: usize, matrix: &CsMat<usize>) -> bool {
 }
 /// Sequence reconstruction helpers.
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use sprs::{indexing::SpIndex, CsMat, TriMat};
 
 use lapjv::lapjv;
 
 use crate::overlap::Adjacency;
+
+/// Options that influence assembly post-processing (contig splitting, tie handling).
+#[derive(Debug, Clone)]
+pub struct AssemblyOptions {
+    /// Treat rows with top-band ties as ambiguous when gap <= tie_gap.
+    pub tie_gap: f32,
+    /// Start a new contig when hitting an ambiguous read or weak/absent edge.
+    pub break_on_ambiguity: bool,
+    /// Optional edge-weight threshold to trigger a break (<= threshold breaks).
+    pub break_score_threshold: Option<usize>,
+    /// Bonus applied to mate edges when breaking ties during path search.
+    pub mate_bonus: f32,
+    /// Optional map from read index to its mate (by index) for tie-breaking.
+    pub mate_map: Option<Arc<Vec<Option<usize>>>>,
+}
+
+impl Default for AssemblyOptions {
+    fn default() -> Self {
+        Self {
+            tie_gap: 0.0,
+            break_on_ambiguity: false,
+            break_score_threshold: None,
+            mate_bonus: 0.0,
+            mate_map: None,
+        }
+    }
+}
 use crate::read_source::ReadSource;
 
 pub fn argmin_index(values: &[usize]) -> Option<usize> {
@@ -67,6 +95,14 @@ pub fn adjacency_to_csc(adjacency: &Adjacency, size: Option<usize>) -> CsMat<usi
     adjacency_to_sparse(adjacency, size).to_csc()
 }
 
+/// Result of an assembly: contig sequences plus their read index paths and the full path.
+#[derive(Debug, Clone)]
+pub struct AssemblyResult {
+    pub contigs: Vec<String>,
+    pub contig_paths: Vec<Vec<usize>>,
+    pub full_path: Vec<usize>,
+}
+
 /// Relabel column indices in-place according to the provided mapping.
 pub fn relabel_columns(matrix: &mut TriMat<usize>, cols_map: &HashMap<usize, usize>) {
     let triplets: Vec<(usize, usize, usize)> = matrix
@@ -110,7 +146,7 @@ pub fn find_first_subdiagonal_path(
     reads: &[String],
     read_ids: &[String],
     qualities: Option<&[Vec<i32>]>,
-) -> (String, Vec<usize>) {
+) -> AssemblyResult {
     // Delegate to the ReadSource-backed implementation so callers that supply
     // an in-memory `&[String]` continue to work while the core logic uses the
     // disk-backed protocol (`ReadSource`) internally.
@@ -119,14 +155,59 @@ pub fn find_first_subdiagonal_path(
     find_first_subdiagonal_path_from_readsource(matrix, overlap_csc, &inmem, read_ids, qualities)
 }
 
+/// Entry point that accepts explicit options for ambiguity-aware contig breaking.
+pub fn find_first_subdiagonal_path_with_options(
+    matrix: &CsMat<usize>,
+    overlap_csc: &CsMat<usize>,
+    reads: &[String],
+    read_ids: &[String],
+    qualities: Option<&[Vec<i32>]>,
+    opts: &AssemblyOptions,
+) -> AssemblyResult {
+    let inmem =
+        crate::read_source::InMemoryReadSource::new(reads.to_vec(), Some(read_ids.to_vec()));
+    find_first_subdiagonal_path_with_options_from_readsource(
+        matrix,
+        overlap_csc,
+        &inmem,
+        read_ids,
+        qualities,
+        opts,
+    )
+}
+
 /// Compute assembly path (index order) from matrices without depending on in-memory reads.
-pub fn compute_assembly_path(matrix: &CsMat<usize>, overlap_csc: &CsMat<usize>) -> Vec<usize> {
+pub fn compute_assembly_path(
+    matrix: &CsMat<usize>,
+    overlap_csc: &CsMat<usize>,
+    opts: &AssemblyOptions,
+) -> Vec<usize> {
     use ndarray::Array2;
     let n = matrix.rows();
     let mut cost_matrix = Array2::<f64>::zeros((n, n));
+
+    let mate_bonus = opts.mate_bonus as f64;
+    let mate_map = opts
+        .mate_map
+        .as_deref()
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+
+    let has_mate_edge = |src: usize, dst: usize| -> bool {
+        if mate_bonus == 0.0 {
+            return false;
+        }
+        let mate_src = mate_map.get(src).and_then(|m| *m);
+        let mate_dst = mate_map.get(dst).and_then(|m| *m);
+        mate_src == Some(dst) || mate_dst == Some(src)
+    };
+
     for i in 0..n {
         for j in 0..n {
-            let score = matrix.get(i, j).copied().unwrap_or(0) as f64;
+            let mut score = matrix.get(i, j).copied().unwrap_or(0) as f64;
+            if has_mate_edge(i, j) {
+                score += mate_bonus;
+            }
             cost_matrix[(i, j)] = -score;
         }
     }
@@ -210,9 +291,29 @@ pub fn compute_assembly_path(matrix: &CsMat<usize>, overlap_csc: &CsMat<usize>) 
     let overlap_csr = overlap_csc.to_csr();
     let mut current = start;
     let mut tried_for_node: HashMap<usize, HashSet<usize>> = HashMap::new();
+
+    let mate_bonus = opts.mate_bonus as f64;
+    let mate_map = opts
+        .mate_map
+        .as_deref()
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+
+    let weight_with_bonus = |src: usize, dst: usize, base: usize| -> f64 {
+        let mut w = base as f64;
+        if mate_bonus != 0.0 {
+            let mate_src = mate_map.get(src).and_then(|m| *m);
+            let mate_dst = mate_map.get(dst).and_then(|m| *m);
+            if mate_src == Some(dst) || mate_dst == Some(src) {
+                w += mate_bonus;
+            }
+        }
+        w
+    };
+
     while visited.len() < n {
         let tried = tried_for_node.entry(current).or_insert_with(HashSet::new);
-        let mut best: Option<(usize, usize, usize)> = None;
+        let mut best: Option<(usize, f64, usize)> = None;
         if let Some(row_vec) = csr.outer_view(current) {
             for (col_idx, &weight) in row_vec.indices().iter().zip(row_vec.data().iter()) {
                 let target = *col_idx;
@@ -223,14 +324,15 @@ pub fn compute_assembly_path(matrix: &CsMat<usize>, overlap_csc: &CsMat<usize>) 
                     .get(current, target)
                     .copied()
                     .unwrap_or_default();
+                let effective = weight_with_bonus(current, target, weight);
                 match best {
-                    None => best = Some((target, weight, overlap)),
+                    None => best = Some((target, effective, overlap)),
                     Some((bt, bw, bo)) => {
-                        if weight > bw
-                            || (weight == bw && overlap > bo)
-                            || (weight == bw && overlap == bo && target < bt)
+                        if effective > bw
+                            || (effective == bw && overlap > bo)
+                            || (effective == bw && overlap == bo && target < bt)
                         {
-                            best = Some((target, weight, overlap));
+                            best = Some((target, effective, overlap));
                         }
                     }
                 }
@@ -274,34 +376,132 @@ pub fn find_first_subdiagonal_path_from_readsource<R: ReadSource + ?Sized>(
     reads_src: &R,
     _read_ids: &[String],
     _qualities: Option<&[Vec<i32>]>,
-) -> (String, Vec<usize>) {
-    let path = compute_assembly_path(matrix, overlap_csc);
+) -> AssemblyResult {
+    // Use default options when the caller did not provide any (compat path).
+    let opts = AssemblyOptions::default();
+    find_first_subdiagonal_path_with_options_from_readsource(
+        matrix,
+        overlap_csc,
+        reads_src,
+        _read_ids,
+        _qualities,
+        &opts,
+    )
+}
+
+/// Options-aware entry point that supports contig splitting based on ambiguity/edge quality.
+pub fn find_first_subdiagonal_path_with_options_from_readsource<R: ReadSource + ?Sized>(
+    matrix: &CsMat<usize>,
+    overlap_csc: &CsMat<usize>,
+    reads_src: &R,
+    _read_ids: &[String],
+    _qualities: Option<&[Vec<i32>]>,
+    opts: &AssemblyOptions,
+) -> AssemblyResult {
+    let path = compute_assembly_path(matrix, overlap_csc, opts);
     if path.is_empty() {
-        return (String::new(), path);
+        return AssemblyResult {
+            contigs: Vec::new(),
+            contig_paths: Vec::new(),
+            full_path: path,
+        };
     }
-    let mut sequence: Vec<u8> = Vec::new();
-    match reads_src.get_seq(path[0]) {
-        Ok(s) => sequence.extend_from_slice(s.as_bytes()),
-        Err(_) => return (String::new(), path),
-    }
-    for window in path.windows(2) {
-        let prev = window[0];
-        let next = window[1];
-        let overlap_len = overlap_csc.get(prev, next).copied().unwrap_or(0) as usize;
-        let prev_len = reads_src.get_len(prev).unwrap_or(0);
-        let next_len = reads_src.get_len(next).unwrap_or(0);
-        let overlap_len = overlap_len.min(prev_len).min(next_len);
-        if overlap_len < next_len {
-            match reads_src.get_seq(next) {
-                Ok(s) => {
-                    let slice = &s[overlap_len..];
-                    sequence.extend_from_slice(slice.as_bytes());
+
+    // Precompute ambiguous rows based on tie_gap across top-band scores.
+    let n = matrix.rows();
+    let mut ambiguous: Vec<bool> = vec![false; n];
+    if opts.tie_gap >= 0.0 {
+        for (row_idx, row_vec) in matrix.outer_iterator().enumerate() {
+            let mut scores: Vec<usize> = row_vec.data().iter().copied().collect();
+            if scores.is_empty() {
+                continue;
+            }
+            scores.sort_unstable_by(|a, b| b.cmp(a));
+            let top = scores[0];
+            let mut band = 1usize;
+            for &s in scores.iter().skip(1) {
+                let gap = (top as f32) - (s as f32);
+                if gap <= opts.tie_gap {
+                    band += 1;
+                } else {
+                    break;
                 }
-                Err(_) => return (String::new(), path),
+            }
+            if band >= 2 {
+                ambiguous[row_idx] = true;
             }
         }
     }
-    (String::from_utf8(sequence).unwrap_or_default(), path)
+
+    // Break the path into contigs based on ambiguity or weak/missing edges.
+    let mut contig_paths: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    current.push(path[0]);
+    for window in path.windows(2) {
+        let prev = window[0];
+        let next = window[1];
+        let weight = matrix.get(prev, next).copied().unwrap_or(0);
+        let break_on_weight = opts
+            .break_score_threshold
+            .map(|th| weight <= th)
+            .unwrap_or(false);
+        let break_on_gap = weight == 0;
+        let break_on_amb = opts.break_on_ambiguity && (ambiguous[prev] || ambiguous[next]);
+        let should_break = break_on_weight || break_on_gap || break_on_amb;
+
+        if should_break {
+            contig_paths.push(std::mem::take(&mut current));
+            current.push(next);
+        } else {
+            current.push(next);
+        }
+    }
+    if !current.is_empty() {
+        contig_paths.push(current);
+    }
+
+    // Assemble sequences for each contig path using overlap trimming.
+    let mut contigs: Vec<String> = Vec::with_capacity(contig_paths.len());
+    for cp in &contig_paths {
+        if cp.is_empty() {
+            continue;
+        }
+        let mut sequence: Vec<u8> = Vec::new();
+        match reads_src.get_seq(cp[0]) {
+            Ok(s) => sequence.extend_from_slice(s.as_bytes()),
+            Err(_) => {
+                contigs.push(String::new());
+                continue;
+            }
+        }
+        for window in cp.windows(2) {
+            let prev = window[0];
+            let next = window[1];
+            let overlap_len = overlap_csc.get(prev, next).copied().unwrap_or(0) as usize;
+            let prev_len = reads_src.get_len(prev).unwrap_or(0);
+            let next_len = reads_src.get_len(next).unwrap_or(0);
+            let overlap_len = overlap_len.min(prev_len).min(next_len);
+            if overlap_len < next_len {
+                match reads_src.get_seq(next) {
+                    Ok(s) => {
+                        let slice = &s[overlap_len..];
+                        sequence.extend_from_slice(slice.as_bytes());
+                    }
+                    Err(_) => {
+                        contigs.push(String::new());
+                        continue;
+                    }
+                }
+            }
+        }
+        contigs.push(String::from_utf8(sequence).unwrap_or_default());
+    }
+
+    AssemblyResult {
+        contigs,
+        contig_paths,
+        full_path: path,
+    }
 }
 
 /// Detect cycles (SCCs) in adjacency represented as Vec<HashMap<usize,usize>>.
@@ -475,9 +675,9 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(2));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
-        assert_eq!(assembled, "ACGTAA");
+        let res = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+        assert_eq!(res.contigs.len(), 1);
+        assert_eq!(res.contigs[0], "ACGTAA");
     }
 
     #[test]
@@ -493,9 +693,10 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(2));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) =
+        let res =
             find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, Some(&qualities));
-        assert_eq!(assembled, "ACGTAA");
+        assert_eq!(res.contigs.len(), 1);
+        assert_eq!(res.contigs[0], "ACGTAA");
     }
 
     #[test]
@@ -528,8 +729,8 @@ mod tests {
         let overlap_csc = overlaps_to_csc(&overlaps);
 
         // With swap-square guard, both orders should be acceptable
-        let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+        let res = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+        let assembled = res.contigs.first().cloned().unwrap_or_default();
         // Result should be valid (either A→B→C or A→C→B path)
         assert!(assembled.starts_with("AAAA"));
         assert!(assembled.len() >= 12); // At least 3 reads worth
@@ -566,8 +767,8 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(4));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+        let res = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+        let assembled = res.contigs.first().cloned().unwrap_or_default();
         // Should follow valid forward path: A→B→D, then append C
         assert!(assembled.len() > 0);
     }
@@ -602,8 +803,8 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(4));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+        let res = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+        let assembled = res.contigs.first().cloned().unwrap_or_default();
         // With overlaps, total length will be: 8 + (8-3) + (8-3) + (8-3) = 8+5+5+5 = 23
         // But actual behavior depends on path order
         assert!(assembled.len() >= 8); // At least one read
@@ -635,8 +836,8 @@ mod tests {
         let matrix = adjacency_to_csc(&adjacency, Some(3));
 
         let overlap_csc = overlaps_to_csc(&overlaps);
-        let (assembled, _path) =
-            find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+        let res = find_first_subdiagonal_path(&matrix, &overlap_csc, &reads, &read_ids, None);
+        let assembled = res.contigs.first().cloned().unwrap_or_default();
         // With overlap=3: 8 + (8-3) + (8-3) = 8+5+5 = 18
         // But overlap includes overlapping bases, so: "AAAABBBB" + "BCCCC" + "CDDDD" = "AAAABBBBBCCCCCDDDD" (19 chars)
         assert_eq!(assembled.len(), 18); // Correct accounting for overlaps

@@ -67,8 +67,9 @@ fn assemble_from_reads(
     let read_ids: Vec<String> = (0..reads.len()).map(|i| format!("read{}", i)).collect();
 
     // Call assembler (qualities not provided)
-    let (seq, _path) =
+    let res =
         find_first_subdiagonal_path(&adjacency_csc, &overlap_csc, &reads, &read_ids, None);
+    let seq = res.contigs.into_iter().next().unwrap_or_default();
 
     Ok(AssemblyResult::new(seq))
 }

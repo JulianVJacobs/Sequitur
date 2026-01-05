@@ -7,6 +7,7 @@
  Refer to the root `README.md` for documentation rules regarding markdown file naming, placement, and indexing. The root README.md serves as the canonical index for all further instructions and rules.
 **Sequitur Agent Guide**
 **Terminal Command Directory Rule**: Always run shell commands using the pattern `(cd /desired/path && command ...)` to ensure the correct working directory is used. This avoids confusion and errors from manual `cd` changes, and always falls back to the workspace root if not specified. Never rely on the current terminal directory state.
+- **Cost Control**: To minimise cost, avoid running commands that will take a while; prefer suggesting scripts or commands for the user to run and report back.
 - **Architecture**: Rust implementation in `rust/` is the primary codebase; Python in `python/` is deprecated for core algorithms but maintained for prototyping and notebooks—prefer Rust with PyO3 bindings for production; see `docs/RUST_ARCHITECTURE.md` for rationale and migration guide.
 - **Alternative Paths**: `alternative_paths.rs` implements swap-square detection; pure Python version in `sequitur_core/alternative_paths.py` is deprecated—direct new code to use `sequitur.analyse_alternative_paths()`.
 - **Documentation**: All feature docs live in `docs/` with `docs/README.md` as index; implementation-specific docs stay in language subdirs (`python/README.md`, `rust/README.md`); update root `README.md` only for quick-start or roadmap changes.

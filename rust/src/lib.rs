@@ -18,8 +18,9 @@ pub use alternative_paths::{
     SwapSquare,
 };
 pub use matching::{
-    adjacency_to_csc, adjacency_to_sparse, find_first_subdiagonal_path, relabel_columns,
-    relabel_rows,
+    adjacency_to_csc, adjacency_to_sparse, find_first_subdiagonal_path,
+    find_first_subdiagonal_path_with_options, relabel_columns, relabel_rows, AssemblyOptions,
+    AssemblyResult,
 };
 pub use overlap::{
     compute_edge_confidences, create_overlap_graph, create_overlap_graph_unified,
