@@ -410,6 +410,27 @@ pub fn create_overlap_graph_unified_from_readsource<R: ReadSource + ?Sized>(
     (adj, overlaps, mat_reads, mat_names)
 }
 
+/// Build the weighted overlap graph with ambiguity detection from any `ReadSource`.
+/// Returns adjacency, overlaps, ambiguity info, and the materialized reads/ids.
+pub fn create_overlap_graph_with_ambiguities_from_readsource<R: ReadSource + ?Sized>(
+    reads: &R,
+    config: OverlapConfig,
+) -> (
+    CsMat<usize>,
+    CsMat<usize>,
+    Vec<AmbiguityInfo>,
+    Vec<String>,
+    Vec<String>,
+) {
+    let min_suffix_len = config.min_suffix_len.max(1);
+    let (trie, mat_reads, mat_names) =
+        PrunedAffixTrie::build_from_readsource(reads, min_suffix_len, config.max_diff);
+    let (adj, overlaps, ambiguities) =
+        create_overlap_graph_from_trie_stream_with_ambiguities(&mat_reads, &trie, config);
+    drop(trie);
+    (adj, overlaps, ambiguities, mat_reads, mat_names)
+}
+
 /// Build the weighted overlap graph with ambiguity detection.
 /// Returns adjacency, overlaps, and ambiguity information for each read.
 pub fn create_overlap_graph_with_ambiguities<'a>(

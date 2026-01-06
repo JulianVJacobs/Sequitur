@@ -13,8 +13,8 @@ use flate2::read::MultiGzDecoder;
 
 use sequitur::{
     create_overlap_graph_unified, create_overlap_graph_unified_from_readsource,
-    create_overlap_graph_with_ambiguities, find_first_subdiagonal_path_with_options, AmbiguityInfo,
-    AssemblyOptions, OverlapConfig,
+    create_overlap_graph_with_ambiguities, create_overlap_graph_with_ambiguities_from_readsource,
+    find_first_subdiagonal_path_with_options, AmbiguityInfo, AssemblyOptions, OverlapConfig,
 };
 
 /// Sequitur Rust CLI (prototype)
@@ -613,11 +613,23 @@ fn run_pipeline(
             let base_str = base.to_string_lossy().to_string();
             match sequitur::read_source::BinaryIndexReadSource::open(&base_str) {
                 Ok(idx_src) => {
-                    let (adj, overlaps, mat_reads, mat_names) =
-                        create_overlap_graph_unified_from_readsource(&idx_src, config);
-                    reads = mat_reads;
-                    read_ids = mat_names;
-                    (adj, overlaps, None)
+                    if break_on_ambiguity {
+                        let (adj, overlaps, ambiguities_vec, mat_reads, mat_names) =
+                            create_overlap_graph_with_ambiguities_from_readsource(&idx_src, config);
+                        reads = mat_reads;
+                        read_ids = mat_names;
+                        info!(
+                            "Detected {} ambiguous reads for contig breaking (index path)",
+                            ambiguities_vec.iter().filter(|a| a.is_ambiguous).count()
+                        );
+                        (adj, overlaps, Some(ambiguities_vec))
+                    } else {
+                        let (adj, overlaps, mat_reads, mat_names) =
+                            create_overlap_graph_unified_from_readsource(&idx_src, config);
+                        reads = mat_reads;
+                        read_ids = mat_names;
+                        (adj, overlaps, None)
+                    }
                 }
                 Err(e) => {
                     log::warn!(
@@ -644,7 +656,22 @@ fn run_pipeline(
     };
 
     if break_on_ambiguity && index_requested {
-        log::warn!("Contig breaking on ambiguity is not yet supported with --read-index mode");
+        match &ambiguities {
+            Some(ambigs) => {
+                let count = ambigs.iter().filter(|a| a.is_ambiguous).count();
+                log::info!(
+                    "Contig breaking will use {} precomputed ambiguous reads from the index",
+                    count
+                );
+            }
+            None => {
+                // If we failed to load an index and fell back to in-memory, we still run
+                // on-the-fly detection so contig breaking remains active.
+                log::info!(
+                    "Contig breaking will use on-the-fly ambiguity detection (index metadata unavailable)"
+                );
+            }
+        }
     }
 
     info!("Overlap graph created.");

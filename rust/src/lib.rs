@@ -25,8 +25,8 @@ pub use matching::{
 pub use overlap::{
     compute_edge_confidences, create_overlap_graph, create_overlap_graph_unified,
     create_overlap_graph_unified_from_readsource, create_overlap_graph_with_ambiguities,
-    normalised_damerau_levenshtein_distance, Adjacency, AmbiguityInfo, OverlapConfig,
-    OverlapGraphResult, OverlapLengths,
+    create_overlap_graph_with_ambiguities_from_readsource, normalised_damerau_levenshtein_distance,
+    Adjacency, AmbiguityInfo, OverlapConfig, OverlapGraphResult, OverlapLengths,
 };
 
 // TODO: export a compact public API mirroring the Python core
