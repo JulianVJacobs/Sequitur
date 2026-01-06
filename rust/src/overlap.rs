@@ -179,8 +179,8 @@ pub fn bounded_shortest_path(
     queue.push_back((start, 0_usize, 0_usize));
     visited.insert(start);
 
-    let adj_csc = adjacency.to_csc();
-    let ovl_csc = overlaps.to_csc();
+    let adj_csr = adjacency.to_csr();
+    let ovl_csr = overlaps.to_csr();
 
     while let Some((current, dist, hops)) = queue.pop_front() {
         if hops >= hop_limit {
@@ -188,16 +188,17 @@ pub fn bounded_shortest_path(
         }
 
         // Get successors from adjacency matrix
-        // In CSC format, we need to iterate over the row to find outgoing edges
-        for col_idx in 0..adj_csc.cols() {
-            if let Some(_score) = adj_csc.get(current, col_idx) {
-                let row_idx = col_idx;
-
-                if visited.contains(&row_idx) {
+        // Use CSR format to iterate over outgoing edges from current row
+        if let Some(row_view) = adj_csr.outer_view(current) {
+            for (successor_idx, _score) in row_view.iter() {
+                if visited.contains(&successor_idx) {
                     continue;
                 }
 
-                let overlap_len = ovl_csc.get(current, row_idx).copied().unwrap_or(0);
+                let overlap_len = ovl_csr
+                    .outer_view(current)
+                    .and_then(|v| v.get(successor_idx).copied())
+                    .unwrap_or(0);
                 let read_len = read_lengths.get(current).copied().unwrap_or(0);
 
                 // Distance advanced = read_length - overlap_length
@@ -208,12 +209,12 @@ pub fn bounded_shortest_path(
                     continue;
                 }
 
-                if row_idx == target {
+                if successor_idx == target {
                     return Some(new_dist);
                 }
 
-                visited.insert(row_idx);
-                queue.push_back((row_idx, new_dist, hops + 1));
+                visited.insert(successor_idx);
+                queue.push_back((successor_idx, new_dist, hops + 1));
             }
         }
     }
