@@ -107,6 +107,14 @@ struct AssembleArgs {
     #[arg(long, default_value_t = 300)]
     insert_size: usize,
 
+    /// Minimum acceptable insert size for mate pairs (lower bound for penalty calculation).
+    #[arg(long, default_value_t = 165)]
+    min_insert: usize,
+
+    /// Maximum acceptable insert size for mate pairs (upper bound for penalty calculation).
+    #[arg(long, default_value_t = 407)]
+    max_insert: usize,
+
     /// Weight factor for mate penalties (higher = stronger penalty for non-mate paths).
     #[arg(long, default_value_t = 1.0)]
     mate_penalty_weight: f32,
@@ -259,6 +267,8 @@ fn main() {
         args.error_penalty_exponent,
         args.mate_aware_ties,
         args.insert_size,
+        args.min_insert,
+        args.max_insert,
         args.mate_penalty_weight,
         args.mate_penalty_hop_limit,
         args.mate_penalty_cost_cap,
@@ -432,6 +442,8 @@ fn run_pipeline(
     error_penalty_exponent: f32,
     mate_aware_ties: bool,
     insert_size: usize,
+    min_insert: usize,
+    max_insert: usize,
     mate_penalty_weight: f32,
     mate_penalty_hop_limit: usize,
     mate_penalty_cost_cap: usize,
@@ -542,6 +554,8 @@ fn run_pipeline(
         mate_aware_scoring: mate_aware_ties,
         mate_map: mate_map_vec.clone(),
         insert_size,
+        min_insert,
+        max_insert,
         mate_penalty_weight,
         mate_penalty_hop_limit,
         mate_penalty_cost_cap,
@@ -933,6 +947,8 @@ mod smoke {
             2.0,   // error_penalty_exponent
             false, // mate_aware_ties
             300,   // insert_size
+            165,   // min_insert
+            407,   // max_insert
             1.0,   // mate_penalty_weight
             10,    // mate_penalty_hop_limit
             1000,  // mate_penalty_cost_cap

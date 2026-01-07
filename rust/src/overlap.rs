@@ -51,6 +51,10 @@ pub struct OverlapConfig {
     pub mate_map: Option<Vec<Option<usize>>>,
     /// Expected insert size between mate pairs (in basepairs).
     pub insert_size: usize,
+    /// Minimum acceptable insert size for mate pairs (lower bound for penalty calculation).
+    pub min_insert: usize,
+    /// Maximum acceptable insert size for mate pairs (upper bound for penalty calculation).
+    pub max_insert: usize,
     /// Weight factor for mate penalty (penalty = weight × distance_error).
     pub mate_penalty_weight: f32,
     /// Maximum hops for bounded shortest path search in mate penalty calculation.
@@ -75,6 +79,8 @@ impl Default for OverlapConfig {
             mate_aware_scoring: false,   // Disabled by default for backward compatibility
             mate_map: None,
             insert_size: 300, // Default ~300bp insert size
+            min_insert: 165,  // 5th percentile for typical library
+            max_insert: 407,  // 95th percentile for typical library
             mate_penalty_weight: 1.0,
             mate_penalty_hop_limit: 10,
             mate_penalty_cost_cap: 1000,
@@ -223,7 +229,7 @@ pub fn bounded_shortest_path(
 }
 
 /// Calculate mate penalty based on predicted distance to mate pair.
-/// Returns 0.0 if no mate, or a penalty proportional to the deviation from expected insert size.
+/// Returns 0.0 if no mate, or a penalty proportional to the deviation from acceptable insert range.
 ///
 /// # Arguments
 /// * `read_idx` - Index of the current read
@@ -232,13 +238,14 @@ pub fn bounded_shortest_path(
 /// * `adjacency` - Sparse adjacency matrix
 /// * `overlaps` - Sparse overlap matrix
 /// * `read_lengths` - Vector of read lengths
-/// * `insert_size` - Expected insert size between mate pairs
+/// * `min_insert` - Minimum acceptable insert size
+/// * `max_insert` - Maximum acceptable insert size
 /// * `penalty_weight` - Multiplier for the penalty
 /// * `hop_limit` - Maximum hops for bounded search
 /// * `cost_cap` - Maximum distance for bounded search
 ///
 /// # Returns
-/// Penalty value to subtract from quality-adjusted score (0.0 if no mate or within tolerance)
+/// Penalty value to subtract from quality-adjusted score (0.0 if no mate or within acceptable range)
 pub fn compute_mate_penalty(
     read_idx: usize,
     successor_idx: usize,
@@ -246,7 +253,8 @@ pub fn compute_mate_penalty(
     adjacency: &CsMat<usize>,
     overlaps: &CsMat<usize>,
     read_lengths: &[usize],
-    insert_size: usize,
+    min_insert: usize,
+    max_insert: usize,
     penalty_weight: f32,
     hop_limit: usize,
     cost_cap: usize,
@@ -287,11 +295,14 @@ pub fn compute_mate_penalty(
         }
     };
 
-    // Compute distance error
-    let distance_error = if predicted_distance > insert_size {
-        (predicted_distance - insert_size) as f32
+    // Compute distance error based on acceptable range
+    let distance_error = if predicted_distance < min_insert {
+        (min_insert - predicted_distance) as f32
+    } else if predicted_distance > max_insert {
+        (predicted_distance - max_insert) as f32
     } else {
-        (insert_size - predicted_distance) as f32
+        // Within acceptable range - no penalty
+        0.0
     };
 
     // Apply penalty proportional to error
@@ -817,7 +828,8 @@ fn create_overlap_graph_from_trie_stream_with_ambiguities(
                         &temp_adj,
                         &temp_ovl,
                         &read_lengths,
-                        config.insert_size,
+                        config.min_insert,
+                        config.max_insert,
                         config.mate_penalty_weight,
                         config.mate_penalty_hop_limit,
                         config.mate_penalty_cost_cap,
@@ -1377,7 +1389,8 @@ mod tests {
             &adjacency,
             &overlaps,
             &read_lengths,
-            300, // insert_size
+            250, // min_insert
+            350, // max_insert
             1.0, // penalty_weight
             10,  // hop_limit
             500, // cost_cap
@@ -1423,7 +1436,8 @@ mod tests {
             &adjacency,
             &overlaps,
             &read_lengths,
-            100, // insert_size (distance is (100-50)+(100-50)=100, perfect match)
+            80,  // min_insert (distance is (100-50)+(100-50)=100)
+            120, // max_insert
             1.0, // penalty_weight
             10,  // hop_limit
             500, // cost_cap
@@ -1437,7 +1451,8 @@ mod tests {
             &adjacency,
             &overlaps,
             &read_lengths,
-            100, // insert_size
+            80,  // min_insert
+            120, // max_insert
             1.0, // penalty_weight
             10,  // hop_limit
             500, // cost_cap
@@ -1481,7 +1496,8 @@ mod tests {
             &adjacency,
             &overlaps,
             &read_lengths,
-            100,
+            80,  // min_insert
+            120, // max_insert
             1.0,
             10,
             500,
@@ -1493,7 +1509,8 @@ mod tests {
             &adjacency,
             &overlaps,
             &read_lengths,
-            100,
+            80,  // min_insert
+            120, // max_insert
             1.0,
             10,
             500,
