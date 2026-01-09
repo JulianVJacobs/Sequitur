@@ -167,6 +167,22 @@ struct AssembleArgs {
     #[arg(long)]
     use_array: bool,
 
+    /// Quality scoring mode: none (default), position, or confidence
+    #[arg(long, default_value = "none")]
+    quality_mode: String,
+
+    /// Exponent for quality-adjusted error penalty (higher = stricter penalty)
+    #[arg(long, default_value_t = 2.0)]
+    quality_exponent: f32,
+
+    /// Minimum quality threshold; bases below this treated as ambiguous (0 = no minimum)
+    #[arg(long)]
+    min_quality: Option<i32>,
+
+    /// Enable verbose logging of quality scoring decisions
+    #[arg(long, default_value_t = false)]
+    log_quality_scores: bool,
+
     /// Maximum normalised edit fraction for overlaps (e.g., 0.25). <0.1 disables fuzzy k-mer augmentation.
     #[arg(long, default_value_t = 0.25)]
     max_diff: f32,
@@ -456,32 +472,60 @@ fn run_pipeline(
 
     let mut reads: Vec<String> = Vec::new();
     let mut read_ids: Vec<String> = Vec::new();
+    let mut qualities: Vec<Vec<i32>> = Vec::new();
     let mut reads1_count: usize = 0;
     let mut reads2_count: usize = 0;
 
     if !index_requested {
-        let (reads1, reads1_ids) = read_sequences(Path::new(reads1_path))
-            .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
-        let (reads2_raw, reads2_ids_raw) = read_sequences(Path::new(reads2_path))
-            .with_context(|| format!("Failed to parse reads from {}", reads2_path))?;
+        // Check if inputs are FASTQ to enable quality loading
+        let format1 = infer_format(Path::new(reads1_path));
+        let format2 = infer_format(Path::new(reads2_path));
+        let is_fastq = format1 == SequenceFormat::Fastq && format2 == SequenceFormat::Fastq;
 
-        // In-memory path: do NOT reverse-complement reads2 here. The index builder
-        // is responsible for reverse-complementing reads2 when requested, and the
-        // pipeline will consume indexed materialization as-is. Keep in-memory reads
-        // in their original orientation to avoid double-RC confusion.
-        let reads2 = reads2_raw;
+        if is_fastq {
+            // Load with quality scores
+            use sequitur::read_source::load_fastq_with_quality;
+            let (reads1, quals1, reads1_ids) = load_fastq_with_quality(reads1_path, false)
+                .with_context(|| {
+                    format!("Failed to load FASTQ with quality from {}", reads1_path)
+                })?;
+            let (reads2, quals2, reads2_ids) = load_fastq_with_quality(reads2_path, !no_revcomp)
+                .with_context(|| {
+                    format!("Failed to load FASTQ with quality from {}", reads2_path)
+                })?;
 
-        // Keep original read IDs (no "/RC" annotation) for in-memory mode.
-        let reads2_ids: Vec<String> = reads2_ids_raw;
+            reads1_count = reads1.len();
+            reads2_count = reads2.len();
+            reads = Vec::with_capacity(reads1_count + reads2_count);
+            read_ids = Vec::with_capacity(reads1_count + reads2_count);
+            qualities = Vec::with_capacity(reads1_count + reads2_count);
+            reads.extend(reads1);
+            reads.extend(reads2);
+            read_ids.extend(reads1_ids);
+            read_ids.extend(reads2_ids);
+            qualities.extend(quals1);
+            qualities.extend(quals2);
+            info!("Loaded {} FASTQ reads with quality scores", reads.len());
+        } else {
+            // Load without quality (FASTA or plain lines)
+            let (reads1, reads1_ids) = read_sequences(Path::new(reads1_path))
+                .with_context(|| format!("Failed to parse reads from {}", reads1_path))?;
+            let (reads2_raw, reads2_ids_raw) = read_sequences(Path::new(reads2_path))
+                .with_context(|| format!("Failed to parse reads from {}", reads2_path))?;
 
-        reads1_count = reads1.len();
-        reads2_count = reads2.len();
-        reads = Vec::with_capacity(reads1_count + reads2_count);
-        read_ids = Vec::with_capacity(reads1_count + reads2_count);
-        reads.extend(reads1.iter().cloned());
-        reads.extend(reads2.iter().cloned());
-        read_ids.extend(reads1_ids.iter().cloned());
-        read_ids.extend(reads2_ids.iter().cloned());
+            let reads2 = reads2_raw;
+            let reads2_ids: Vec<String> = reads2_ids_raw;
+
+            reads1_count = reads1.len();
+            reads2_count = reads2.len();
+            reads = Vec::with_capacity(reads1_count + reads2_count);
+            read_ids = Vec::with_capacity(reads1_count + reads2_count);
+            reads.extend(reads1.iter().cloned());
+            reads.extend(reads2.iter().cloned());
+            read_ids.extend(reads1_ids.iter().cloned());
+            read_ids.extend(reads2_ids.iter().cloned());
+            info!("Loaded {} reads (no quality scores)", reads.len());
+        }
     }
 
     // Export read map as NDJSON if requested
@@ -759,12 +803,19 @@ fn run_pipeline(
         ambiguities,
     };
 
+    // Pass qualities to assembly if available
+    let qualities_opt = if qualities.is_empty() {
+        None
+    } else {
+        Some(&qualities[..])
+    };
+
     let assembly_result = find_first_subdiagonal_path_with_options(
         &adjacency_csc,
         &overlap_csc,
         &reads,
         &read_ids,
-        None,
+        qualities_opt,
         &assembly_opts,
     );
     let assembly_path = assembly_result.full_path.clone();

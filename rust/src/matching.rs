@@ -425,7 +425,8 @@ pub fn find_first_subdiagonal_path_with_options_from_readsource<R: ReadSource + 
         contig_paths.push(current);
     }
 
-    // Assemble sequences for each contig path using overlap trimming.
+    // Assemble sequences for each contig path using overlap trimming,
+    // with optional quality-aware consensus over the overlapped region.
     let mut contigs: Vec<String> = Vec::with_capacity(contig_paths.len());
     for cp in &contig_paths {
         if cp.is_empty() {
@@ -446,6 +447,38 @@ pub fn find_first_subdiagonal_path_with_options_from_readsource<R: ReadSource + 
             let prev_len = reads_src.get_len(prev).unwrap_or(0);
             let next_len = reads_src.get_len(next).unwrap_or(0);
             let overlap_len = overlap_len.min(prev_len).min(next_len);
+
+            // Perform quality-aware consensus over the overlapped region, if qualities provided.
+            if overlap_len > 0 {
+                if let Ok(prev_seq_cow) = reads_src.get_seq(prev) {
+                    if let Ok(next_seq_cow) = reads_src.get_seq(next) {
+                        let prev_seq = prev_seq_cow.as_bytes();
+                        let next_seq = next_seq_cow.as_bytes();
+                        let prev_start = prev_len.saturating_sub(overlap_len);
+                        if let Some(qs) = _qualities {
+                            let prev_q = qs.get(prev);
+                            let next_q = qs.get(next);
+                            if let (Some(pq), Some(nq)) = (prev_q, next_q) {
+                                for i in 0..overlap_len {
+                                    let assembled_idx =
+                                        sequence.len().saturating_sub(overlap_len) + i;
+                                    if assembled_idx >= sequence.len() {
+                                        break;
+                                    }
+                                    let pb = prev_seq.get(prev_start + i).copied().unwrap_or(b'N');
+                                    let nb = next_seq.get(i).copied().unwrap_or(b'N');
+                                    if pb != nb {
+                                        let pqi = pq.get(prev_start + i).copied().unwrap_or(0);
+                                        let nqi = nq.get(i).copied().unwrap_or(0);
+                                        sequence[assembled_idx] = if pqi >= nqi { pb } else { nb };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if overlap_len < next_len {
                 match reads_src.get_seq(next) {
                     Ok(s) => {

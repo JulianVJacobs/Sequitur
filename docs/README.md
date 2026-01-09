@@ -7,6 +7,7 @@ For quick-start and project overview, see the [root README](../README.md).
 
 * **[ALTERNATIVE_PATHS.md](ALTERNATIVE_PATHS.md)** — Alternative assembly path detection: swap squares, cycles, and chain analysis
 * **[READ_INDEX.md](READ_INDEX.md)** — On-disk read index format and `--read-index` usage
+* **[PARAMETER_SELECTION.md](PARAMETER_SELECTION.md)** — Deterministic parameter selection via dataset profiling
 * **Threading & Parallelization** — See [RUST_ARCHITECTURE.md](RUST_ARCHITECTURE.md) for threading config, CLI and Python API usage, and migration guide
 
 ## Architecture

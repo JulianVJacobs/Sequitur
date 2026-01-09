@@ -28,6 +28,10 @@ pub use overlap::{
     create_overlap_graph_with_ambiguities_from_readsource, normalised_damerau_levenshtein_distance,
     Adjacency, AmbiguityInfo, OverlapConfig, OverlapGraphResult, OverlapLengths,
 };
+pub use read_source::{
+    build_index_from_pair, BinaryIndexReadSource, InMemoryReadSource, QualityAwareReadSource,
+    QualityStatus, ReadSource, ReadSourceError,
+};
 
 // TODO: export a compact public API mirroring the Python core
 // e.g. pub fn build_suffix_array(...), pub fn create_adjacency(...)

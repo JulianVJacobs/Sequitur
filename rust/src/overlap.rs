@@ -8,7 +8,86 @@ use strsim::damerau_levenshtein;
 use crate::affix::PrunedAffixTrie;
 use crate::read_source::ReadSource;
 
-/// Mapping from source read index to weighted successor indices.
+/// Quality score integration strategy.
+/// None: no quality weighting (current behavior)
+/// Position: soft mismatch penalty scaled by quality at mismatched positions
+/// Confidence: phred-explicit scoring; matches at high-Q positions boost score more
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityScoring {
+    None,
+    Position,
+    Confidence,
+}
+
+/// Configuration for quality-aware overlap scoring.
+#[derive(Debug, Clone)]
+pub struct QualityConfig {
+    /// How quality scores affect overlap weight.
+    pub scoring_mode: QualityScoring,
+
+    /// Exponent for error penalty: 1.0=linear, 2.0=quadratic.
+    pub error_penalty_exponent: f32,
+
+    /// Minimum quality threshold; bases below this treated as ambiguous.
+    /// None = no minimum threshold.
+    pub min_quality: Option<i32>,
+
+    /// Enable quality-based tie-breaking in consensus assembly.
+    pub use_quality_for_consensus: bool,
+
+    /// Enable verbose logging of quality scoring decisions.
+    pub log_quality_scores: bool,
+}
+
+impl Default for QualityConfig {
+    fn default() -> Self {
+        QualityConfig {
+            scoring_mode: QualityScoring::None,
+            error_penalty_exponent: 2.0,
+            min_quality: None,
+            use_quality_for_consensus: true,
+            log_quality_scores: false,
+        }
+    }
+}
+
+/// Metrics collected during quality-aware overlap scoring.
+#[derive(Debug, Clone, Default)]
+pub struct QualityMetrics {
+    /// Per-read average quality score.
+    pub mean_quality: Vec<f32>,
+    /// Count of positions below min_quality threshold.
+    pub low_quality_positions: usize,
+    /// Number of edges pruned due to low quality.
+    pub edges_removed_by_quality: usize,
+    /// Score histogram before quality adjustment.
+    pub score_histogram_blind: Vec<usize>,
+    /// Score histogram after quality adjustment.
+    pub score_histogram_adjusted: Vec<usize>,
+}
+
+impl QualityMetrics {
+    pub fn new() -> Self {
+        QualityMetrics {
+            mean_quality: Vec::new(),
+            low_quality_positions: 0,
+            edges_removed_by_quality: 0,
+            score_histogram_blind: vec![0; 100],
+            score_histogram_adjusted: vec![0; 100],
+        }
+    }
+
+    /// Record score in histogram (clamped to 0-99).
+    pub fn record_score(&mut self, score: f32, adjusted: bool) {
+        let bucket = (score.min(99.0) as usize).min(99);
+        if adjusted {
+            self.score_histogram_adjusted[bucket] += 1;
+        } else {
+            self.score_histogram_blind[bucket] += 1;
+        }
+    }
+}
+
 pub type Adjacency = Vec<HashMap<usize, usize>>;
 
 /// Companion mapping that records the overlap span associated with each edge.
@@ -61,6 +140,8 @@ pub struct OverlapConfig {
     pub mate_penalty_hop_limit: usize,
     /// Maximum basepair distance cap for bounded shortest path search.
     pub mate_penalty_cost_cap: usize,
+    /// Configuration for quality-aware overlap scoring.
+    pub quality_config: QualityConfig,
 }
 
 impl Default for OverlapConfig {
@@ -84,6 +165,7 @@ impl Default for OverlapConfig {
             mate_penalty_weight: 1.0,
             mate_penalty_hop_limit: 10,
             mate_penalty_cost_cap: 1000,
+            quality_config: QualityConfig::default(),
         }
     }
 }
@@ -97,6 +179,16 @@ pub struct AmbiguityInfo {
     pub is_ambiguous: bool,
     /// Indices of successor reads that are tied with (or near) the top score.
     pub tied_successors: Vec<usize>,
+}
+
+/// Compute phred-based error probability: P(error) = 10^(-Q/10)
+pub fn phred_to_error_probability(phred: i32) -> f32 {
+    10.0_f32.powf(-phred as f32 / 10.0)
+}
+
+/// Compute confidence from phred score: 1 - P(error)
+pub fn phred_to_confidence(phred: i32) -> f32 {
+    1.0 - phred_to_error_probability(phred)
 }
 
 /// Detect ambiguous reads based on top-1 vs top-2 score gap.
@@ -972,10 +1064,35 @@ pub fn verify_overlap_from_anchor(
     shared_affix: &str,
     config: OverlapConfig,
 ) -> Option<(f32, usize)> {
+    verify_overlap_from_anchor_with_quality(
+        suffix_read,
+        prefix_read,
+        shared_affix,
+        None,
+        None,
+        config,
+    )
+}
+
+/// Verify overlap with optional quality scores.
+pub fn verify_overlap_from_anchor_with_quality(
+    suffix_read: &str,
+    prefix_read: &str,
+    shared_affix: &str,
+    suffix_quality: Option<&[i32]>,
+    prefix_quality: Option<&[i32]>,
+    config: OverlapConfig,
+) -> Option<(f32, usize)> {
     let anchor_len = shared_affix.len();
     if anchor_len == 0 {
         // No anchor, do simple full scan
-        return verify_overlap_simple(suffix_read, prefix_read, config);
+        return verify_overlap_simple_with_quality(
+            suffix_read,
+            prefix_read,
+            suffix_quality,
+            prefix_quality,
+            config,
+        );
     }
 
     let min_len = config.min_suffix_len.max(1);
@@ -1000,10 +1117,31 @@ pub fn verify_overlap_from_anchor(
         let float_diff = distance as f32 / span as f32;
 
         if float_diff <= config.max_diff {
-            // Quality-adjusted scoring: penalize errors based on error rate
-            let error_rate = distance as f32 / span as f32;
-            let quality_factor = (1.0 - error_rate).powf(config.error_penalty_exponent);
-            let score = span as f32 * quality_factor;
+            // Compute score using quality-aware scoring if available
+            let score = match config.quality_config.scoring_mode {
+                QualityScoring::Position => score_overlap_position_mode(
+                    suffix_window,
+                    prefix_window,
+                    suffix_quality,
+                    prefix_quality,
+                    span,
+                    config.quality_config.error_penalty_exponent,
+                ),
+                QualityScoring::Confidence => score_overlap_confidence_mode(
+                    suffix_window,
+                    prefix_window,
+                    suffix_quality,
+                    prefix_quality,
+                    span,
+                ),
+                QualityScoring::None => {
+                    // Standard quality-adjusted scoring: penalize errors based on error rate
+                    let error_rate = distance as f32 / span as f32;
+                    let quality_factor = (1.0 - error_rate).powf(config.error_penalty_exponent);
+                    span as f32 * quality_factor
+                }
+            };
+
             if score > best_score || (score == best_score && span > best_overlap) {
                 best_score = score;
                 best_overlap = span;
@@ -1021,11 +1159,13 @@ pub fn verify_overlap_from_anchor(
     }
 }
 
-/// Simple full-scan verification without optimizations.
+/// Simple full-scan verification with optional quality scores.
 /// Used as fallback when no anchor hint exists.
-fn verify_overlap_simple(
+fn verify_overlap_simple_with_quality(
     suffix_read: &str,
     prefix_read: &str,
+    suffix_quality: Option<&[i32]>,
+    prefix_quality: Option<&[i32]>,
     config: OverlapConfig,
 ) -> Option<(f32, usize)> {
     let min_len = config.min_suffix_len.max(1);
@@ -1046,7 +1186,25 @@ fn verify_overlap_simple(
         let float_diff = distance as f32 / span as f32;
 
         if float_diff <= config.max_diff {
-            let score = (span as i32 - distance as i32) as f32;
+            let score = match config.quality_config.scoring_mode {
+                QualityScoring::Position => score_overlap_position_mode(
+                    suffix_window,
+                    prefix_window,
+                    suffix_quality,
+                    prefix_quality,
+                    span,
+                    config.quality_config.error_penalty_exponent,
+                ),
+                QualityScoring::Confidence => score_overlap_confidence_mode(
+                    suffix_window,
+                    prefix_window,
+                    suffix_quality,
+                    prefix_quality,
+                    span,
+                ),
+                QualityScoring::None => (span as i32 - distance as i32) as f32,
+            };
+
             if score > best_score || (score == best_score && span > best_overlap) {
                 best_score = score;
                 best_overlap = span;
@@ -1059,6 +1217,84 @@ fn verify_overlap_simple(
     } else {
         None
     }
+}
+
+/// Compute overlap score using Position mode quality weighting.
+/// Mismatches at low-quality positions receive soft penalty.
+#[allow(dead_code)]
+fn score_overlap_position_mode(
+    suffix_window: &str,
+    prefix_window: &str,
+    suffix_quality: Option<&[i32]>,
+    prefix_quality: Option<&[i32]>,
+    span: usize,
+    error_penalty_exponent: f32,
+) -> f32 {
+    let distance = damerau_levenshtein(suffix_window, prefix_window);
+    let mut score = span as f32;
+
+    if let (Some(sq), Some(pq)) = (suffix_quality, prefix_quality) {
+        // Apply quality-aware penalty to mismatches
+        let suffix_start = sq.len().saturating_sub(span);
+        for i in 0..span {
+            if i < suffix_window.len()
+                && i < prefix_window.len()
+                && suffix_window.as_bytes()[i] != prefix_window.as_bytes()[i]
+            {
+                let sq_idx = suffix_start + i;
+                if sq_idx < sq.len() {
+                    let avg_q = (sq[sq_idx] as f32 + pq[i] as f32) / 2.0;
+                    let q_factor = phred_to_error_probability(avg_q as i32);
+                    // Soft penalty scaled by error probability at this position
+                    score -= q_factor * error_penalty_exponent;
+                }
+            }
+        }
+    } else {
+        // No quality: use standard error rate penalty
+        let error_rate = distance as f32 / span as f32;
+        let quality_factor = (1.0 - error_rate).powf(error_penalty_exponent);
+        score = span as f32 * quality_factor;
+    }
+
+    score.max(1.0)
+}
+
+/// Compute overlap score using Confidence mode quality weighting.
+/// Matches at high-quality positions boost score; mismatches penalize.
+#[allow(dead_code)]
+fn score_overlap_confidence_mode(
+    suffix_window: &str,
+    prefix_window: &str,
+    suffix_quality: Option<&[i32]>,
+    prefix_quality: Option<&[i32]>,
+    span: usize,
+) -> f32 {
+    let mut score = 0.0;
+
+    if let (Some(sq), Some(pq)) = (suffix_quality, prefix_quality) {
+        let suffix_start = sq.len().saturating_sub(span);
+        for i in 0..span {
+            if i < suffix_window.len() && i < prefix_window.len() {
+                let sq_idx = suffix_start + i;
+                if sq_idx < sq.len() {
+                    let avg_q = (sq[sq_idx] as f32 + pq[i] as f32) / 2.0;
+                    let confidence = phred_to_confidence(avg_q as i32);
+                    if suffix_window.as_bytes()[i] == prefix_window.as_bytes()[i] {
+                        score += confidence; // Match: boost by confidence
+                    } else {
+                        score -= confidence; // Mismatch: penalize by confidence
+                    }
+                }
+            }
+        }
+    } else {
+        // No quality: treat all as equal
+        let distance = damerau_levenshtein(suffix_window, prefix_window);
+        score = span as f32 - distance as f32;
+    }
+
+    score.max(1.0)
 }
 
 /// Build the weighted overlap graph for the supplied reads (legacy array-based).
