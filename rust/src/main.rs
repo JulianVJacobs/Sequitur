@@ -127,6 +127,18 @@ struct AssembleArgs {
     #[arg(long, default_value_t = 1000)]
     mate_penalty_cost_cap: usize,
 
+    /// Enable per-read adaptive max_diff based on quality scores (default: false).
+    #[arg(long, default_value_t = false)]
+    adaptive_max_diff: bool,
+
+    /// Minimum max_diff allowed when using adaptive thresholds (default: 0.05 = 5% error).
+    #[arg(long, default_value_t = 0.05)]
+    adaptive_max_diff_min: f32,
+
+    /// Maximum max_diff allowed when using adaptive thresholds (default: 0.35 = 35% error).
+    #[arg(long, default_value_t = 0.35)]
+    adaptive_max_diff_max: f32,
+
     /// Split contigs when encountering high ambiguity (tied successors) or weak edges.
     #[arg(long, default_value_t = false)]
     break_on_ambiguity: bool,
@@ -171,10 +183,6 @@ struct AssembleArgs {
     #[arg(long, default_value = "none")]
     quality_mode: String,
 
-    /// Exponent for quality-adjusted error penalty (higher = stricter penalty)
-    #[arg(long, default_value_t = 2.0)]
-    quality_exponent: f32,
-
     /// Minimum quality threshold; bases below this treated as ambiguous (0 = no minimum)
     #[arg(long)]
     min_quality: Option<i32>,
@@ -184,7 +192,7 @@ struct AssembleArgs {
     log_quality_scores: bool,
 
     /// Maximum normalised edit fraction for overlaps (e.g., 0.25). <0.1 disables fuzzy k-mer augmentation.
-    #[arg(long, default_value_t = 0.25)]
+    #[arg(long, default_value_t = 0.35)]
     max_diff: f32,
 
     /// Minimum suffix/overlap length to consider (filters tiny overlaps)
@@ -288,6 +296,9 @@ fn main() {
         args.mate_penalty_weight,
         args.mate_penalty_hop_limit,
         args.mate_penalty_cost_cap,
+        args.adaptive_max_diff,
+        args.adaptive_max_diff_min,
+        args.adaptive_max_diff_max,
     ) {
         eprintln!("Assembly failed: {error:?}");
         std::process::exit(1);
@@ -463,6 +474,9 @@ fn run_pipeline(
     mate_penalty_weight: f32,
     mate_penalty_hop_limit: usize,
     mate_penalty_cost_cap: usize,
+    adaptive_max_diff: bool,
+    adaptive_max_diff_min: f32,
+    adaptive_max_diff_max: f32,
 ) -> Result<String> {
     // If an index is requested (explicit base, temp request, or output_index supplied)
     // avoid reading and reverse-complementing the reads into memory here to prevent
@@ -603,6 +617,9 @@ fn run_pipeline(
         mate_penalty_weight,
         mate_penalty_hop_limit,
         mate_penalty_cost_cap,
+        adaptive_max_diff,
+        adaptive_max_diff_min,
+        adaptive_max_diff_max,
         ..OverlapConfig::default()
     };
     if config.use_trie {
@@ -1003,6 +1020,9 @@ mod smoke {
             1.0,   // mate_penalty_weight
             10,    // mate_penalty_hop_limit
             1000,  // mate_penalty_cost_cap
+            false, // adaptive_max_diff
+            0.05,  // adaptive_max_diff_min
+            0.35,  // adaptive_max_diff_max
         );
         assert!(res.is_ok());
     }

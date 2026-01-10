@@ -142,6 +142,12 @@ pub struct OverlapConfig {
     pub mate_penalty_cost_cap: usize,
     /// Configuration for quality-aware overlap scoring.
     pub quality_config: QualityConfig,
+    /// Enable per-read adaptive max_diff based on read quality scores.
+    pub adaptive_max_diff: bool,
+    /// Minimum allowed max_diff when using adaptive thresholds (prevents overly strict filtering).
+    pub adaptive_max_diff_min: f32,
+    /// Maximum allowed max_diff when using adaptive thresholds (prevents overly permissive filtering).
+    pub adaptive_max_diff_max: f32,
 }
 
 impl Default for OverlapConfig {
@@ -166,6 +172,9 @@ impl Default for OverlapConfig {
             mate_penalty_hop_limit: 10,
             mate_penalty_cost_cap: 1000,
             quality_config: QualityConfig::default(),
+            adaptive_max_diff: false,    // Disabled by default
+            adaptive_max_diff_min: 0.05, // Allow down to 5% error
+            adaptive_max_diff_max: 0.35, // Cap at 35% error even for low-quality reads
         }
     }
 }
@@ -189,6 +198,31 @@ pub fn phred_to_error_probability(phred: i32) -> f32 {
 /// Compute confidence from phred score: 1 - P(error)
 pub fn phred_to_confidence(phred: i32) -> f32 {
     1.0 - phred_to_error_probability(phred)
+}
+
+/// Compute per-read maximum edit distance tolerance from quality scores.
+/// Uses mean/median phred quality to derive an expected error rate,
+/// then derives a max_diff that permits that error rate within bounds.
+///
+/// Higher quality reads get stricter (lower) max_diff; lower quality reads get looser (higher) max_diff.
+pub fn compute_per_read_max_diff(qualities: Option<&[i32]>, min_diff: f32, max_diff: f32) -> f32 {
+    if let Some(q) = qualities {
+        if q.is_empty() {
+            return max_diff;
+        }
+
+        // Compute mean quality
+        let mean_q = q.iter().sum::<i32>() as f32 / q.len() as f32;
+
+        // Convert mean quality to expected error rate
+        let expected_error_rate = phred_to_error_probability(mean_q as i32);
+
+        // Clamp the expected error rate within [min_diff, max_diff]
+        expected_error_rate.clamp(min_diff, max_diff)
+    } else {
+        // No quality available, use the global max_diff
+        max_diff
+    }
 }
 
 /// Detect ambiguous reads based on top-1 vs top-2 score gap.
@@ -1101,6 +1135,17 @@ pub fn verify_overlap_from_anchor_with_quality(
     let mut best_score = f32::MIN;
     let mut best_overlap = 0;
 
+    // Determine effective max_diff: use adaptive if enabled, else global
+    let effective_max_diff = if config.adaptive_max_diff {
+        compute_per_read_max_diff(
+            suffix_quality,
+            config.adaptive_max_diff_min,
+            config.adaptive_max_diff_max,
+        )
+    } else {
+        config.max_diff
+    };
+
     // Start search from anchor and extend outward
     let start_span = anchor_len.max(min_len);
     let end_span = max_span.min(start_span + 20); // Only check ±20bp around anchor
@@ -1116,7 +1161,7 @@ pub fn verify_overlap_from_anchor_with_quality(
         let distance = damerau_levenshtein(suffix_window, prefix_window);
         let float_diff = distance as f32 / span as f32;
 
-        if float_diff <= config.max_diff {
+        if float_diff <= effective_max_diff {
             // Compute score using quality-aware scoring if available
             let score = match config.quality_config.scoring_mode {
                 QualityScoring::Position => score_overlap_position_mode(
@@ -1174,6 +1219,17 @@ fn verify_overlap_simple_with_quality(
     let mut best_score = f32::MIN;
     let mut best_overlap = 0;
 
+    // Determine effective max_diff: use adaptive if enabled, else global
+    let effective_max_diff = if config.adaptive_max_diff {
+        compute_per_read_max_diff(
+            suffix_quality,
+            config.adaptive_max_diff_min,
+            config.adaptive_max_diff_max,
+        )
+    } else {
+        config.max_diff
+    };
+
     for span in min_len..=max_span {
         if span > suffix_read.len() || span > prefix_read.len() {
             break;
@@ -1185,7 +1241,7 @@ fn verify_overlap_simple_with_quality(
         let distance = damerau_levenshtein(suffix_window, prefix_window);
         let float_diff = distance as f32 / span as f32;
 
-        if float_diff <= config.max_diff {
+        if float_diff <= effective_max_diff {
             let score = match config.quality_config.scoring_mode {
                 QualityScoring::Position => score_overlap_position_mode(
                     suffix_window,
