@@ -697,6 +697,7 @@ impl PrunedAffixTrie {
         reads: &[String],
         max_diff: f32,
         min_suffix_len: usize,
+        per_read_max_diff: Option<&[f32]>,
     ) -> Vec<(usize, usize, f32, usize)> {
         // Stream candidates from trie nodes directly to avoid large intermediate allocation.
         let mut best: HashMap<(usize, usize), (f32, usize)> = HashMap::new();
@@ -739,6 +740,11 @@ impl PrunedAffixTrie {
 
                             let mut best_score = f32::MIN;
                             let mut best_overlap = 0usize;
+                            let local_max_diff = per_read_max_diff
+                                .and_then(|v| v.get(read1))
+                                .copied()
+                                .unwrap_or(max_diff);
+
                             for span in start_span..=end_span {
                                 if span > suffix_read.len() || span > prefix_read.len() {
                                     break;
@@ -747,7 +753,7 @@ impl PrunedAffixTrie {
                                 let prefix_window = &prefix_read[..span];
                                 let distance = damerau_levenshtein(suffix_window, prefix_window);
                                 let float_diff = distance as f32 / span as f32;
-                                if float_diff <= max_diff {
+                                if float_diff <= local_max_diff {
                                     let error_rate = distance as f32 / span as f32;
                                     let quality_factor = (1.0 - error_rate).powf(2.0);
                                     let score = span as f32 * quality_factor;
@@ -794,6 +800,11 @@ impl PrunedAffixTrie {
 
                                     let mut best_score = f32::MIN;
                                     let mut best_overlap = 0usize;
+                                    let local_max_diff = per_read_max_diff
+                                        .and_then(|v| v.get(read1))
+                                        .copied()
+                                        .unwrap_or(max_diff);
+
                                     for span in start_span..=end_span {
                                         if span > suffix_read.len() || span > prefix_read.len() {
                                             break;
@@ -804,7 +815,7 @@ impl PrunedAffixTrie {
                                         let distance =
                                             damerau_levenshtein(suffix_window, prefix_window);
                                         let float_diff = distance as f32 / span as f32;
-                                        if float_diff <= max_diff {
+                                        if float_diff <= local_max_diff {
                                             let error_rate = distance as f32 / span as f32;
                                             let quality_factor = (1.0 - error_rate).powf(2.0);
                                             let score = span as f32 * quality_factor;
@@ -849,6 +860,7 @@ impl PrunedAffixTrie {
         reads: &[String],
         max_diff: f32,
         min_suffix_len: usize,
+        per_read_max_diff: Option<&[f32]>,
         mut emit: F,
     ) where
         F: FnMut(usize, usize, f32, usize),
@@ -889,6 +901,11 @@ impl PrunedAffixTrie {
 
                             let mut best_score = f32::MIN;
                             let mut best_overlap = 0usize;
+                            let local_max_diff = per_read_max_diff
+                                .and_then(|v| v.get(read1))
+                                .copied()
+                                .unwrap_or(max_diff);
+
                             for span in start_span..=end_span {
                                 if span > suffix_read.len() || span > prefix_read.len() {
                                     break;
@@ -897,7 +914,7 @@ impl PrunedAffixTrie {
                                 let prefix_window = &prefix_read[..span];
                                 let distance = damerau_levenshtein(suffix_window, prefix_window);
                                 let float_diff = distance as f32 / span as f32;
-                                if float_diff <= max_diff {
+                                if float_diff <= local_max_diff {
                                     let error_rate = distance as f32 / span as f32;
                                     let quality_factor = (1.0 - error_rate).powf(2.0);
                                     let score = span as f32 * quality_factor;
@@ -938,6 +955,11 @@ impl PrunedAffixTrie {
 
                                     let mut best_score = f32::MIN;
                                     let mut best_overlap = 0usize;
+                                    let local_max_diff = per_read_max_diff
+                                        .and_then(|v| v.get(read1))
+                                        .copied()
+                                        .unwrap_or(max_diff);
+
                                     for span in start_span..=end_span {
                                         if span > suffix_read.len() || span > prefix_read.len() {
                                             break;
@@ -948,7 +970,7 @@ impl PrunedAffixTrie {
                                         let distance =
                                             damerau_levenshtein(suffix_window, prefix_window);
                                         let float_diff = distance as f32 / span as f32;
-                                        if float_diff <= max_diff {
+                                        if float_diff <= local_max_diff {
                                             let error_rate = distance as f32 / span as f32;
                                             let quality_factor = (1.0 - error_rate).powf(2.0);
                                             let score = span as f32 * quality_factor;

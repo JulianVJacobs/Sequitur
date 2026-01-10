@@ -6,7 +6,7 @@ use sprs::CsMat;
 use strsim::damerau_levenshtein;
 
 use crate::affix::PrunedAffixTrie;
-use crate::read_source::ReadSource;
+use crate::read_source::{QualityAwareReadSource, ReadSource};
 
 /// Quality score integration strategy.
 /// None: no quality weighting (current behavior)
@@ -223,6 +223,41 @@ pub fn compute_per_read_max_diff(qualities: Option<&[i32]>, min_diff: f32, max_d
         // No quality available, use the global max_diff
         max_diff
     }
+}
+
+/// Compute per-read adaptive tolerances from a quality-aware read source.
+/// Returns None if adaptive_max_diff is disabled or if quality retrieval fails.
+fn derive_per_read_max_diff<R: QualityAwareReadSource + ?Sized>(
+    reads: &R,
+    n: usize,
+    config: &OverlapConfig,
+) -> Option<Vec<f32>> {
+    if !config.adaptive_max_diff {
+        return None;
+    }
+
+    let mut per_read: Vec<f32> = Vec::with_capacity(n);
+    for i in 0..n {
+        let q = match reads.get_quality(i) {
+            Ok(opt) => opt,
+            Err(e) => {
+                log::warn!(
+                    "Falling back to global max_diff: failed to load quality for read {}: {:?}",
+                    i,
+                    e
+                );
+                return None;
+            }
+        };
+        let eff = compute_per_read_max_diff(
+            q.as_ref().map(|c| c.as_ref()),
+            config.adaptive_max_diff_min,
+            config.adaptive_max_diff_max,
+        );
+        per_read.push(eff);
+    }
+
+    Some(per_read)
 }
 
 /// Detect ambiguous reads based on top-1 vs top-2 score gap.
@@ -518,11 +553,17 @@ pub fn create_overlap_graph_unified<'a>(
     config: OverlapConfig,
 ) -> (CsMat<usize>, CsMat<usize>) {
     let min_suffix_len = config.min_suffix_len.max(1);
+    let trie_max_diff = if config.adaptive_max_diff {
+        config.max_diff.max(config.adaptive_max_diff_max)
+    } else {
+        config.max_diff
+    };
+
     // Build trie, collect verified edges, drop trie, then build adjacency
-    let trie = PrunedAffixTrie::build(reads, min_suffix_len, config.max_diff);
+    let trie = PrunedAffixTrie::build(reads, min_suffix_len, trie_max_diff);
     // Stream verified candidates directly into per-source rows to avoid
     // materialising a full verified-vector in memory.
-    let (adj, ovl) = create_overlap_graph_from_trie_stream(reads, &trie, config);
+    let (adj, ovl) = create_overlap_graph_from_trie_stream(reads, &trie, config, None);
     drop(trie);
     (adj, ovl)
 }
@@ -533,23 +574,40 @@ pub fn create_overlap_graph_unified<'a>(
 /// construct the trie and (for now) materializes reads into `Vec<String>` to
 /// reuse the existing trie-based pipeline. Future work may avoid full
 /// materialization.
-pub fn create_overlap_graph_unified_from_readsource<R: ReadSource + ?Sized>(
+pub fn create_overlap_graph_unified_from_readsource<
+    R: ReadSource + QualityAwareReadSource + ?Sized,
+>(
     reads: &R,
     config: OverlapConfig,
 ) -> (CsMat<usize>, CsMat<usize>, Vec<String>, Vec<String>) {
     let min_suffix_len = config.min_suffix_len.max(1);
+    let trie_max_diff = if config.adaptive_max_diff {
+        config.max_diff.max(config.adaptive_max_diff_max)
+    } else {
+        config.max_diff
+    };
     let (trie, mat_reads, mat_names) =
-        PrunedAffixTrie::build_from_readsource(reads, min_suffix_len, config.max_diff);
+        PrunedAffixTrie::build_from_readsource(reads, min_suffix_len, trie_max_diff);
+
+    let per_read_max_diff = derive_per_read_max_diff(reads, mat_reads.len(), &config);
+
     // Stream verified candidates into per-source rows while the trie exists,
     // then drop it to release memory before constructing adjacency matrices.
-    let (adj, overlaps) = create_overlap_graph_from_trie_stream(&mat_reads, &trie, config);
+    let (adj, overlaps) = create_overlap_graph_from_trie_stream(
+        &mat_reads,
+        &trie,
+        config,
+        per_read_max_diff.as_deref(),
+    );
     drop(trie);
     (adj, overlaps, mat_reads, mat_names)
 }
 
 /// Build the weighted overlap graph with ambiguity detection from any `ReadSource`.
 /// Returns adjacency, overlaps, ambiguity info, and the materialized reads/ids.
-pub fn create_overlap_graph_with_ambiguities_from_readsource<R: ReadSource + ?Sized>(
+pub fn create_overlap_graph_with_ambiguities_from_readsource<
+    R: ReadSource + QualityAwareReadSource + ?Sized,
+>(
     reads: &R,
     config: OverlapConfig,
 ) -> (
@@ -560,10 +618,22 @@ pub fn create_overlap_graph_with_ambiguities_from_readsource<R: ReadSource + ?Si
     Vec<String>,
 ) {
     let min_suffix_len = config.min_suffix_len.max(1);
+    let trie_max_diff = if config.adaptive_max_diff {
+        config.max_diff.max(config.adaptive_max_diff_max)
+    } else {
+        config.max_diff
+    };
     let (trie, mat_reads, mat_names) =
-        PrunedAffixTrie::build_from_readsource(reads, min_suffix_len, config.max_diff);
-    let (adj, overlaps, ambiguities) =
-        create_overlap_graph_from_trie_stream_with_ambiguities(&mat_reads, &trie, config);
+        PrunedAffixTrie::build_from_readsource(reads, min_suffix_len, trie_max_diff);
+
+    let per_read_max_diff = derive_per_read_max_diff(reads, mat_reads.len(), &config);
+
+    let (adj, overlaps, ambiguities) = create_overlap_graph_from_trie_stream_with_ambiguities(
+        &mat_reads,
+        &trie,
+        config,
+        per_read_max_diff.as_deref(),
+    );
     drop(trie);
     (adj, overlaps, ambiguities, mat_reads, mat_names)
 }
@@ -575,9 +645,14 @@ pub fn create_overlap_graph_with_ambiguities<'a>(
     config: OverlapConfig,
 ) -> OverlapGraphResult {
     let min_suffix_len = config.min_suffix_len.max(1);
-    let trie = PrunedAffixTrie::build(reads, min_suffix_len, config.max_diff);
+    let trie_max_diff = if config.adaptive_max_diff {
+        config.max_diff.max(config.adaptive_max_diff_max)
+    } else {
+        config.max_diff
+    };
+    let trie = PrunedAffixTrie::build(reads, min_suffix_len, trie_max_diff);
     let (adj, overlaps, ambiguities) =
-        create_overlap_graph_from_trie_stream_with_ambiguities(reads, &trie, config);
+        create_overlap_graph_from_trie_stream_with_ambiguities(reads, &trie, config, None);
     drop(trie);
 
     OverlapGraphResult {
@@ -600,13 +675,20 @@ fn create_overlap_graph_from_trie(
     }
 
     let n = reads.len();
+    let trie_max_diff = if config.adaptive_max_diff {
+        config.max_diff.max(config.adaptive_max_diff_max)
+    } else {
+        config.max_diff
+    };
+
     // Trie now includes fuzzy matches in extension vectors automatically
     log::info!("Collecting & verifying candidates from trie...");
     // Use the trie-side verified candidate emitter (simple verifier)
     let verified = affix_trie.overlap_verified_candidates_simple(
         reads,
-        config.max_diff,
+        trie_max_diff,
         config.min_suffix_len,
+        None,
     );
     log::info!("Found {} verified edges", verified.len());
 
@@ -785,6 +867,7 @@ fn create_overlap_graph_from_trie_stream(
     reads: &[String],
     affix_trie: &crate::affix::PrunedAffixTrie,
     config: OverlapConfig,
+    per_read_max_diff: Option<&[f32]>,
 ) -> (CsMat<usize>, CsMat<usize>) {
     if reads.is_empty() {
         let empty1 = CsMat::<usize>::zero((0, 0));
@@ -793,6 +876,12 @@ fn create_overlap_graph_from_trie_stream(
     }
 
     let n = reads.len();
+
+    let trie_max_diff = if config.adaptive_max_diff {
+        config.max_diff.max(config.adaptive_max_diff_max)
+    } else {
+        config.max_diff
+    };
 
     // Prepare per-source best maps
     let mut per_source: Vec<HashMap<usize, (f32, usize)>> =
@@ -803,8 +892,9 @@ fn create_overlap_graph_from_trie_stream(
     let mut found = 0usize;
     affix_trie.overlap_verified_candidates_stream(
         reads,
-        config.max_diff,
+        trie_max_diff,
         config.min_suffix_len,
+        per_read_max_diff,
         |s, d, score, span| {
             found += 1;
             let row = &mut per_source[s];
@@ -896,6 +986,7 @@ fn create_overlap_graph_from_trie_stream_with_ambiguities(
     reads: &[String],
     affix_trie: &crate::affix::PrunedAffixTrie,
     config: OverlapConfig,
+    per_read_max_diff: Option<&[f32]>,
 ) -> (CsMat<usize>, CsMat<usize>, Vec<AmbiguityInfo>) {
     if reads.is_empty() {
         let empty1 = CsMat::<usize>::zero((0, 0));
@@ -905,6 +996,12 @@ fn create_overlap_graph_from_trie_stream_with_ambiguities(
 
     let n = reads.len();
 
+    let trie_max_diff = if config.adaptive_max_diff {
+        config.max_diff.max(config.adaptive_max_diff_max)
+    } else {
+        config.max_diff
+    };
+
     // Prepare per-source best maps
     let mut per_source: Vec<HashMap<usize, (f32, usize)>> =
         (0..n).map(|_| HashMap::new()).collect();
@@ -913,8 +1010,9 @@ fn create_overlap_graph_from_trie_stream_with_ambiguities(
     log::info!("Collecting & verifying candidates from trie (stream)...");
     affix_trie.overlap_verified_candidates_stream(
         reads,
-        config.max_diff,
+        trie_max_diff,
         config.min_suffix_len,
+        per_read_max_diff,
         |s, d, score, span| {
             let row = &mut per_source[s];
             let prev = row.get(&d).copied().unwrap_or((f32::MIN, 0));
